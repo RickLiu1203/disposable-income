@@ -107,6 +107,7 @@ export interface KalshiMultivariateEventsResponse {
 export interface EventBundle {
   event: KalshiEvent;
   markets: KalshiMarket[];
+  periodInterval: number;
   metadata: KalshiEventMetadata | null;
   candlesticks: KalshiCandlestickResponse | null;
   forecastHistory: KalshiForecastHistoryResponse | null;
@@ -274,7 +275,7 @@ async function loadOptional<T>(
   }
 }
 
-export async function getEventBundle(
+async function fetchRawEventBundle(
   seriesTicker: string,
   eventTicker: string,
   opts: EventBundleOptions = {}
@@ -317,7 +318,7 @@ export async function getEventBundle(
     ),
   ]);
 
-  const bundle: EventBundle = { event, markets, metadata, candlesticks, forecastHistory, partialErrors };
+  const bundle: EventBundle = { event, markets, periodInterval, metadata, candlesticks, forecastHistory, partialErrors };
 
   const collectionTicker = markets.find((m) => m.mve_collection_ticker)?.mve_collection_ticker;
   if (collectionTicker) {
@@ -335,6 +336,12 @@ export async function getEventBundle(
 // URLs, redundant timestamps, and — the biggest offender — candlestick
 // open/high/low/mean for price *and* separately for bid *and* ask, which is
 // ~15 numbers per time bucket when 2-3 capture the same trend).
+//
+// getEventBundle() below is the only public entry point for fetching an
+// event's data, and it always returns this compact shape — the raw shape
+// exists only as an internal fetching step (fetchRawEventBundle), never as
+// something a caller can ask for. Keeping the two forms in one file made
+// sense while both were reachable; if that stops being true, split this.
 // ---------------------------------------------------------------------------
 
 export interface CompactMarket {
@@ -375,6 +382,7 @@ export interface CompactEventBundle {
   };
   markets: CompactMarket[];
   priceHistory?: CompactPriceSeries[];
+  priceHistoryPeriodInterval?: number;
   forecastHistory?: KalshiForecastHistoryResponse["forecast_history"];
   multivariateEvents?: Array<{ event_ticker: string; title: string }>;
   partialErrors?: Record<string, string>;
@@ -422,6 +430,7 @@ export function toCompactBundle(bundle: EventBundle): CompactEventBundle {
         open_interest: parseNum(p.open_interest_fp),
       })),
     }));
+    compact.priceHistoryPeriodInterval = bundle.periodInterval;
   }
 
   if (bundle.forecastHistory) {
@@ -440,4 +449,16 @@ export function toCompactBundle(bundle: EventBundle): CompactEventBundle {
   }
 
   return compact;
+}
+
+/** Fetches everything Kalshi has for one event and returns it in the compact
+ * shape — this is the only way to get event data out of this module; there
+ * is no way to ask for the raw, uncompacted bundle. */
+export async function getEventBundle(
+  seriesTicker: string,
+  eventTicker: string,
+  opts: EventBundleOptions = {}
+): Promise<CompactEventBundle> {
+  const bundle = await fetchRawEventBundle(seriesTicker, eventTicker, opts);
+  return toCompactBundle(bundle);
 }
