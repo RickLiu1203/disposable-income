@@ -161,8 +161,6 @@ Kalshi charges a transaction fee on predictions. You MUST calculate your net ret
   - If you **LOSE**: You receive $0.00. 
     $$\text{Net Loss} = \text{stake} + \text{fees}$$
 
-_Only place bets where the estimated probability of the outcome occurring significantly exceeds the fee-adjusted price._
-
 ---
 
 ### Step 4: Strict Betting Rules & Constraints
