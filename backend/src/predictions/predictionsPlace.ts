@@ -45,15 +45,11 @@ export interface PredictionInput {
   justification: string;
 }
 
-export interface ModelEntry {
+export interface ModelPredictionPayload {
+  event_id: string;
   model_name: string;
   strategy_notes?: string;
   predictions?: PredictionInput[];
-}
-
-export interface BulkPredictionsConfig {
-  event_ticker: string;
-  models: ModelEntry[];
 }
 
 export interface InsertedPrediction {
@@ -68,8 +64,8 @@ export interface InsertedPrediction {
   placed_at: string;
 }
 
-export interface BulkPredictionsResult {
-  event_ticker: string;
+export interface ModelPredictionsResult {
+  event_id: string;
   predictions_inserted: number;
   predictions: InsertedPrediction[];
   strategies_upserted: number;
@@ -79,29 +75,28 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-export async function placeBulkPredictions(
-  config: BulkPredictionsConfig
-): Promise<BulkPredictionsResult> {
+export async function placeModelPredictions(
+  config: ModelPredictionPayload
+): Promise<ModelPredictionsResult> {
   const supabase = getSupabaseClient();
-  const eventTicker = config.event_ticker;
+  const eventId = config.event_id;
 
-  // Resolve parent event_id and confirm the sibling ticker exists
-  const { data: tickerRow, error: tickerError } = await supabase
-    .from("event_tickers")
-    .select("event_id, event_ticker")
-    .eq("event_ticker", eventTicker)
+  // Confirm the parent event exists
+  const { data: eventRow, error: eventError } = await supabase
+    .from("events")
+    .select("id")
+    .eq("id", eventId)
     .maybeSingle();
 
-  if (tickerError) {
-    throw new Error(`Failed to resolve event ticker ${eventTicker}: ${tickerError.message}`);
+  if (eventError) {
+    throw new Error(`Failed to resolve event ID ${eventId}: ${eventError.message}`);
   }
-  if (!tickerRow) {
+  if (!eventRow) {
     throw new PredictionValidationError(
-      `Event ticker not found: ${eventTicker}. Ingest it first via POST /kalshi/add-event.`,
-      [{ model_name: "*", field: "event_ticker", message: `Event ticker ${eventTicker} has not been ingested` }]
+      `Event not found for ID: ${eventId}. Ingest it first.`,
+      [{ model_name: config.model_name || "*", field: "event_id", message: `Event ID ${eventId} has not been ingested` }]
     );
   }
-  const eventId = tickerRow.event_id;
 
   // Load all markets for this consolidated parent event to validate predictions across all sibling bets
   const { data: marketRows, error: marketsError } = await supabase
@@ -135,121 +130,115 @@ export async function placeBulkPredictions(
     stake: number;
     entry_price: number;
     justification: string;
-  }>[] = [];
+  }> = [];
 
   const strategyRows: { model_name: string; event_id: string; strategy_notes: string }[] = [];
 
-  for (const entry of config.models) {
-    const modelName = entry.model_name;
+  const modelName = config.model_name;
 
-    if (!isNonEmptyString(modelName)) {
-      details.push({ model_name: String(modelName), field: "model_name", message: "model_name is required" });
-      continue;
+  if (!isNonEmptyString(modelName)) {
+    details.push({ model_name: String(modelName), field: "model_name", message: "model_name is required" });
+  } else if (!knownModels.has(modelName)) {
+    details.push({ model_name: modelName, field: "model_name", message: `Unknown model: ${modelName}` });
+  }
+
+  const hasStrategy = config.strategy_notes !== undefined;
+  const hasPredictions = config.predictions !== undefined;
+  if (!hasStrategy && !hasPredictions) {
+    details.push({
+      model_name: modelName || "*",
+      field: "predictions",
+      message: "Model entry must include 'strategy_notes' and/or a non-empty 'predictions' array",
+    });
+  }
+
+  if (hasStrategy && isNonEmptyString(modelName)) {
+    if (!isNonEmptyString(config.strategy_notes)) {
+      details.push({ model_name: modelName, field: "strategy_notes", message: "strategy_notes must be a non-empty string" });
+    } else {
+      strategyRows.push({ model_name: modelName, event_id: eventId, strategy_notes: config.strategy_notes });
     }
-    if (!knownModels.has(modelName)) {
-      details.push({ model_name: modelName, field: "model_name", message: `Unknown model: ${modelName}` });
-    }
+  }
 
-    const hasStrategy = entry.strategy_notes !== undefined;
-    const hasPredictions = entry.predictions !== undefined;
-    if (!hasStrategy && !hasPredictions) {
-      details.push({
-        model_name: modelName,
-        field: "predictions",
-        message: "Model entry must include 'strategy_notes' and/or a non-empty 'predictions' array",
-      });
-    }
+  if (hasPredictions && isNonEmptyString(modelName)) {
+    if (!Array.isArray(config.predictions) || config.predictions.length === 0) {
+      details.push({ model_name: modelName, field: "predictions", message: "predictions must be a non-empty array" });
+    } else {
+      config.predictions.forEach((prediction, index) => {
+        const { market_ticker: marketTicker, side, stake, justification } = prediction ?? ({} as PredictionInput);
 
-    if (hasStrategy) {
-      if (!isNonEmptyString(entry.strategy_notes)) {
-        details.push({ model_name: modelName, field: "strategy_notes", message: "strategy_notes must be a non-empty string" });
-      } else {
-        strategyRows.push({ model_name: modelName, event_id: eventId, strategy_notes: entry.strategy_notes });
-      }
-    }
-
-    if (hasPredictions) {
-      if (!Array.isArray(entry.predictions) || entry.predictions.length === 0) {
-        details.push({ model_name: modelName, field: "predictions", message: "predictions must be a non-empty array" });
-      } else {
-        const modelPredictionRows: any[] = [];
-        entry.predictions.forEach((prediction, index) => {
-          const { market_ticker: marketTicker, side, stake, justification } = prediction ?? ({} as PredictionInput);
-
-          if (!isNonEmptyString(marketTicker) || !marketPrices.has(marketTicker)) {
-            details.push({
-              model_name: modelName,
-              index,
-              field: "market_ticker",
-              message: `Market ${marketTicker} does not belong to consolidated event ${eventId} (or does not exist)`,
-            });
-            return;
-          }
-          if (side !== "yes" && side !== "no") {
-            details.push({ model_name: modelName, index, field: "side", message: "side must be 'yes' or 'no'" });
-            return;
-          }
-          if (typeof stake !== "number" || !(stake > 0)) {
-            details.push({ model_name: modelName, index, field: "stake", message: "stake must be a number > 0" });
-            return;
-          }
-          if (!isNonEmptyString(justification)) {
-            details.push({ model_name: modelName, index, field: "justification", message: "justification is required" });
-            return;
-          }
-
-          const yesPrice = marketPrices.get(marketTicker);
-          if (yesPrice === null || yesPrice === undefined) {
-            details.push({
-              model_name: modelName,
-              index,
-              field: "market_ticker",
-              message: `Market ${marketTicker} has no price yet — cannot derive entry_price`,
-            });
-            return;
-          }
-          const entryPrice = side === "yes" ? yesPrice : 1 - yesPrice;
-          if (!(entryPrice > 0 && entryPrice < 1)) {
-            details.push({
-              model_name: modelName,
-              index,
-              field: "market_ticker",
-              message: `Derived entry_price ${entryPrice} for market ${marketTicker} is out of the insertable (0,1) range`,
-            });
-            return;
-          }
-
-          const resolvedTicker = marketToTicker.get(marketTicker)!;
-          modelPredictionRows.push({
+        if (!isNonEmptyString(marketTicker) || !marketPrices.has(marketTicker)) {
+          details.push({
             model_name: modelName,
-            event_id: eventId,
-            event_ticker: resolvedTicker,
-            market_ticker: marketTicker,
-            side,
-            stake,
-            entry_price: entryPrice,
-            justification,
+            index,
+            field: "market_ticker",
+            message: `Market ${marketTicker} does not belong to consolidated event ${eventId} (or does not exist)`,
           });
+          return;
+        }
+        if (side !== "yes" && side !== "no") {
+          details.push({ model_name: modelName, index, field: "side", message: "side must be 'yes' or 'no'" });
+          return;
+        }
+        if (typeof stake !== "number" || !(stake > 0)) {
+          details.push({ model_name: modelName, index, field: "stake", message: "stake must be a number > 0" });
+          return;
+        }
+        if (!isNonEmptyString(justification)) {
+          details.push({ model_name: modelName, index, field: "justification", message: "justification is required" });
+          return;
+        }
+
+        const yesPrice = marketPrices.get(marketTicker);
+        if (yesPrice === null || yesPrice === undefined) {
+          details.push({
+            model_name: modelName,
+            index,
+            field: "market_ticker",
+            message: `Market ${marketTicker} has no price yet — cannot derive entry_price`,
+          });
+          return;
+        }
+        const entryPrice = side === "yes" ? yesPrice : 1 - yesPrice;
+        if (!(entryPrice > 0 && entryPrice < 1)) {
+          details.push({
+            model_name: modelName,
+            index,
+            field: "market_ticker",
+            message: `Derived entry_price ${entryPrice} for market ${marketTicker} is out of the insertable (0,1) range`,
+          });
+          return;
+        }
+
+        const resolvedTicker = marketToTicker.get(marketTicker)!;
+        predictionRows.push({
+          model_name: modelName,
+          event_id: eventId,
+          event_ticker: resolvedTicker,
+          market_ticker: marketTicker,
+          side,
+          stake,
+          entry_price: entryPrice,
+          justification,
         });
-        predictionRows.push(modelPredictionRows);
-      }
+      });
     }
   }
 
   if (details.length > 0) {
     throw new PredictionValidationError(
-      `Validation failed for ${details.length} issue(s) in the bulk predictions config`,
+      `Validation failed for ${details.length} issue(s) in the prediction payload`,
       details
     );
   }
 
-  const flatPredictionRows = predictionRows.flat();
   let insertedPredictions: InsertedPrediction[] = [];
-  if (flatPredictionRows.length > 0) {
+  if (predictionRows.length > 0) {
     const { data: inserted, error: insertError } = await supabase
       .from("predictions")
-      .insert(flatPredictionRows)
+      .insert(predictionRows)
       .select();
+
     if (insertError) {
       throw new Error(`Failed to insert predictions for event ${eventId}: ${insertError.message}`);
     }
@@ -266,7 +255,7 @@ export async function placeBulkPredictions(
   }
 
   return {
-    event_ticker: eventTicker,
+    event_id: eventId,
     predictions_inserted: insertedPredictions.length,
     predictions: insertedPredictions,
     strategies_upserted: strategyRows.length,

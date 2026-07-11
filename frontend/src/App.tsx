@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, Fragment } from "react";
 import {
   Search,
   Plus,
@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronUp,
   Trash2,
+  Trophy,
 } from "lucide-react";
 
 // Types matching the backend schema
@@ -78,6 +79,27 @@ interface ForecastSnapshot {
   percentile_points: PercentilePoint[];
 }
 
+interface Prediction {
+  id: number;
+  model_name: string;
+  market_ticker: string;
+  event_ticker: string;
+  side: "yes" | "no";
+  stake: number;
+  entry_price: number;
+  justification: string;
+  outcome: string;
+  payout: number | null;
+  placed_at: string;
+  settled_at: string | null;
+}
+
+interface Strategy {
+  model_name: string;
+  strategy_notes: string;
+  created_at: string;
+}
+
 interface EventDetail {
   event: {
     id: string;
@@ -98,6 +120,28 @@ interface EventDetail {
   markets: MarketRow[];
   priceHistory: PriceHistorySeries[];
   forecastHistory: ForecastSnapshot[];
+  predictions: Prediction[];
+  strategies: Strategy[];
+  leaderboard: EventLeaderboardRow[];
+}
+
+interface EventLeaderboardRow {
+  model_name: string;
+  starting_balance: number;
+  ending_balance: number | null;
+  percent_change: number | null;
+  event_rank: number;
+  prediction_count: number;
+  strategy_notes: string | null;
+}
+
+interface LifetimeLeaderboardRow {
+  model_name: string;
+  events_participated: number;
+  avg_percent_change: number;
+  total_pnl: number;
+  total_rewards_earned: number;
+  lifetime_rank: number;
 }
 
 interface IngestResult {
@@ -146,6 +190,23 @@ export default function App() {
   );
   const [showRawJson, setShowRawJson] = useState(false);
 
+  // Paste predictions state
+  const [predictionPasteInput, setPredictionPasteInput] = useState("");
+  const [placingPredictions, setPlacingPredictions] = useState(false);
+  const [placeError, setPlaceError] = useState<string | null>(null);
+  const [placeValidationErrorDetails, setPlaceValidationErrorDetails] = useState<any[] | null>(null);
+  const [placeSuccess, setPlaceSuccess] = useState<any | null>(null);
+
+  // Lifetime Leaderboard & Sections state
+  const [activeSection, setActiveSection] = useState<"events" | "lifetime">("events");
+  const [lifetimeLeaderboard, setLifetimeLeaderboard] = useState<LifetimeLeaderboardRow[]>([]);
+  const [loadingLifetime, setLoadingLifetime] = useState(false);
+  const [lifetimeError, setLifetimeError] = useState<string | null>(null);
+
+  // Detail view tab & strategy expansions
+  const [detailTab, setDetailTab] = useState<"markets" | "leaderboard">("markets");
+  const [expandedStrategies, setExpandedStrategies] = useState<Record<string, boolean>>({});
+
   // Fetch events list
   const fetchEvents = async (selectTickerAfterFetch?: string) => {
     setLoadingEvents(true);
@@ -168,6 +229,31 @@ export default function App() {
       setLoadingEvents(false);
     }
   };
+
+  const fetchLifetimeLeaderboard = async () => {
+    setLoadingLifetime(true);
+    setLifetimeError(null);
+    try {
+      const res = await fetch("/api/events/lifetime-leaderboard");
+      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      const data = await res.json();
+      if (data.ok) {
+        setLifetimeLeaderboard(data.data);
+      } else {
+        throw new Error(data.error || "Failed to fetch lifetime leaderboard");
+      }
+    } catch (err) {
+      setLifetimeError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setLoadingLifetime(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSection === "lifetime") {
+      fetchLifetimeLeaderboard();
+    }
+  }, [activeSection]);
 
   // Check backend connection on mount
   useEffect(() => {
@@ -198,6 +284,12 @@ export default function App() {
       setLoadingDetail(true);
       setDetailError(null);
       setSettleResult(null);
+      setPredictionPasteInput("");
+      setPlaceError(null);
+      setPlaceValidationErrorDetails(null);
+      setPlaceSuccess(null);
+      setDetailTab("markets");
+      setExpandedStrategies({});
       try {
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selectedTicker);
         const queryParam = isUuid ? `event_id=${selectedTicker}` : `event_ticker=${selectedTicker}`;
@@ -351,6 +443,61 @@ export default function App() {
     }
   };
 
+  const handlePlacePredictions = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!predictionPasteInput.trim()) return;
+
+    setPlacingPredictions(true);
+    setPlaceError(null);
+    setPlaceValidationErrorDetails(null);
+    setPlaceSuccess(null);
+
+    try {
+      let parsed;
+      try {
+        parsed = JSON.parse(predictionPasteInput.trim());
+      } catch {
+        throw new Error("Invalid JSON: The pasted text is not valid JSON.");
+      }
+
+      const res = await fetch("/api/predictions/place", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(parsed),
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.ok) {
+        setPlaceSuccess(data.data);
+        setPredictionPasteInput("");
+        // Refresh details to reflect changes
+        if (selectedTicker) {
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selectedTicker);
+          const queryParam = isUuid ? `event_id=${selectedTicker}` : `event_ticker=${selectedTicker}`;
+          const detailRes = await fetch(`/api/events/detail?${queryParam}`);
+          const detailData = await detailRes.json();
+          if (detailData.ok) {
+            setDetail(detailData.data);
+          }
+        }
+      } else {
+        if (data.details) {
+          setPlaceValidationErrorDetails(data.details);
+          setPlaceError(data.error || "Validation failed");
+        } else {
+          throw new Error(data.error || "Failed to place predictions");
+        }
+      }
+    } catch (err) {
+      setPlaceError(err instanceof Error ? err.message : "Placing predictions failed");
+    } finally {
+      setPlacingPredictions(false);
+    }
+  };
+
   const toggleRules = (ticker: string) => {
     setExpandedRules((prev) => ({
       ...prev,
@@ -405,6 +552,32 @@ export default function App() {
               Kalshi Event Ingestion Hub
             </p>
           </div>
+
+          {/* Navigation Section Switcher */}
+          <div className="flex items-center space-x-1 bg-slate-900/60 p-1 rounded-lg border border-slate-800/80 ml-8">
+            <button
+              onClick={() => setActiveSection("events")}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+                activeSection === "events"
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-600/10"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              }`}
+            >
+              <Activity className="h-3.5 w-3.5" />
+              <span>Events Hub</span>
+            </button>
+            <button
+              onClick={() => setActiveSection("lifetime")}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+                activeSection === "lifetime"
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-600/10"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              }`}
+            >
+              <Trophy className="h-3.5 w-3.5" />
+              <span>Lifetime Standings</span>
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center space-x-4">
@@ -432,8 +605,10 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 flex overflow-hidden max-w-[1600px] mx-auto w-full">
-        {/* Left Panel - Ingest & Events List */}
-        <section className="w-96 border-r border-slate-900 flex flex-col bg-slate-950/50 shrink-0">
+        {activeSection === "events" ? (
+          <>
+            {/* Left Panel - Ingest & Events List */}
+            <section className="w-96 border-r border-slate-900 flex flex-col bg-slate-950/50 shrink-0">
           {/* Ingestion Box */}
           <div className="p-5 border-b border-slate-900">
             <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
@@ -746,225 +921,554 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Markets Section */}
-              <div className="space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-900 pb-2">
-                  <div className="flex items-center space-x-2">
-                    <Activity className="h-5 w-5 text-purple-400" />
-                    <h3 className="text-base font-bold text-slate-200">
-                      Nested Markets ({detail.markets.length})
-                    </h3>
+              {/* Upload Agent Predictions Card */}
+              <div className="p-6 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-900 space-y-4">
+                <div className="flex items-center space-x-2 pb-2 border-b border-slate-900">
+                  <Plus className="h-5 w-5 text-purple-400" />
+                  <h3 className="text-base font-bold text-slate-200">
+                    Upload Agent Predictions
+                  </h3>
+                </div>
+                
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Paste the JSON outputted by the betting agent model below. It must include 
+                  <code className="text-purple-400 font-mono mx-1">event_id</code>, 
+                  <code className="text-purple-400 font-mono mx-1">model_name</code>, 
+                  and optionally <code className="text-purple-400 font-mono mx-1">strategy_notes</code> and 
+                  <code className="text-purple-400 font-mono mx-1">predictions</code>.
+                </p>
+
+                <form onSubmit={handlePlacePredictions} className="space-y-4">
+                  <div>
+                    <textarea
+                      value={predictionPasteInput}
+                      onChange={(e) => setPredictionPasteInput(e.target.value)}
+                      placeholder={`{\n  "event_id": "${detail.event.id || 'e185fe0f-...'}",\n  "model_name": "gemini-3.5-flash",\n  "strategy_notes": "Favoring...",\n  "predictions": [\n    {\n      "market_ticker": "${detail.markets[0]?.ticker || 'KXWCADVANCE-...'}",\n      "side": "yes",\n      "stake": 5.0,\n      "justification": "..."\n    }\n  ]\n}`}
+                      rows={8}
+                      disabled={placingPredictions}
+                      className="w-full p-3 text-xs bg-slate-900/60 border border-slate-800 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 transition text-slate-100 placeholder-slate-500 font-mono disabled:opacity-55"
+                    />
                   </div>
-                  <span className="text-[10px] text-slate-500 font-mono">
-                    POINT-IN-TIME SNAPSHOT AS OF INGESTION
-                  </span>
-                </div>
 
-                <div className="grid gap-6">
-                  {detail.markets.map((m) => {
-                    const priceHistoryForMarket = detail.priceHistory.find(
-                      (h) => h.market_ticker === m.ticker,
-                    );
-                    const hasHistory =
-                      priceHistoryForMarket &&
-                      priceHistoryForMarket.points.length > 0;
+                  <div className="flex justify-between items-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const activeMarket = detail.markets.find(m => m.status === 'active') || detail.markets[0];
+                        const sampleMarketTicker = activeMarket ? activeMarket.ticker : "MARKET-TICKER-HERE";
+                        const template = {
+                          event_id: detail.event.id,
+                          model_name: "gemini-3.5-flash",
+                          strategy_notes: "Overall event strategy notes here.",
+                          predictions: [
+                            {
+                              market_ticker: sampleMarketTicker,
+                              side: "yes",
+                              stake: 5.0,
+                              justification: "Justification factoring in price and fee calculations."
+                            }
+                          ]
+                        };
+                        setPredictionPasteInput(JSON.stringify(template, null, 2));
+                      }}
+                      className="text-xs text-purple-400 hover:text-purple-300 font-medium transition"
+                    >
+                      Load Sample Template
+                    </button>
+                    
+                    <button
+                      type="submit"
+                      disabled={placingPredictions || !predictionPasteInput.trim()}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800 text-white disabled:text-slate-500 rounded-lg text-xs font-semibold shadow-lg shadow-purple-600/10 transition flex items-center space-x-1.5"
+                    >
+                      {placingPredictions ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <span>Uploading...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Upload Predictions</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
 
-                    return (
-                      <div
-                        key={m.ticker}
-                        className="bg-slate-950 border border-slate-900 rounded-xl overflow-hidden hover:border-slate-800 transition"
-                      >
-                        {/* Market Card Top */}
-                        <div className="p-5 flex flex-col md:flex-row md:items-start justify-between gap-4">
-                          <div className="space-y-1 max-w-xl">
-                            <div className="flex items-center space-x-2">
-                              <span className="text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-2 py-0.5 rounded font-mono font-semibold">
-                                {m.ticker}
-                              </span>
-                              {m.status && (
-                                <span
-                                  className={`px-1.5 py-0.5 text-[10px] font-semibold rounded font-mono ${
-                                    m.status === "active"
-                                      ? "bg-emerald-500/10 text-emerald-400"
-                                      : m.status === "settled"
-                                        ? "bg-blue-500/10 text-blue-400"
-                                        : "bg-slate-800 text-slate-400"
-                                  }`}
-                                >
-                                  {m.status.toUpperCase()}
-                                </span>
-                              )}
-                              {m.result && (
-                                <span className="bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 text-[10px] font-bold rounded font-mono">
-                                  RESULT: {m.result.toUpperCase()}
-                                </span>
-                              )}
-                            </div>
-                            <h4 className="text-sm font-semibold text-slate-200 mt-2 font-sans">
-                              {m.label || "Standard Market Option"}
-                            </h4>
-                          </div>
+                {placeError && (
+                  <div className="p-3 rounded bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 space-y-2">
+                    <div className="flex items-center space-x-1.5 font-semibold">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      <span>{placeError}</span>
+                    </div>
+                    {placeValidationErrorDetails && placeValidationErrorDetails.length > 0 && (
+                      <ul className="list-disc pl-5 space-y-1 text-[11px] text-rose-300/80 font-mono">
+                        {placeValidationErrorDetails.map((d, i) => (
+                          <li key={i}>
+                            <strong>[{d.model_name}]</strong> {d.field} {d.index !== undefined ? `[idx:${d.index}]` : ''}: {d.message}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
 
-                          {/* YES Option Pricing Indicator */}
-                          <div className="bg-slate-900/40 border border-slate-900 p-3 rounded-lg flex items-center space-x-4 min-w-[200px] justify-between">
-                            <div>
-                              <span className="text-[10px] text-slate-500 block">
-                                YES PRICE
-                              </span>
-                              <span className="text-lg font-bold text-white font-mono">
-                                {m.yes_price !== null
-                                  ? `${(m.yes_price * 100).toFixed(0)}¢`
-                                  : "--"}
-                              </span>
-                            </div>
-                            <div className="h-8 border-r border-slate-800" />
-                            <div className="text-right">
-                              <span className="text-[10px] text-slate-500 block">
-                                BID / ASK
-                              </span>
-                              <span className="text-xs font-mono font-medium text-slate-300">
-                                {m.yes_bid !== null
-                                  ? `${(m.yes_bid * 100).toFixed(0)}¢`
-                                  : "--"}{" "}
-                                /{" "}
-                                {m.yes_ask !== null
-                                  ? `${(m.yes_ask * 100).toFixed(0)}¢`
-                                  : "--"}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Sparkline & Details Block */}
-                        <div className="px-5 pb-5 grid grid-cols-1 md:grid-cols-3 gap-6 pt-2 border-t border-slate-900/30">
-                          {/* Sparkline History */}
-                          <div className="md:col-span-2">
-                            <span className="text-[10px] text-slate-500 font-mono block mb-2">
-                              PRICE TREND
-                            </span>
-                            {hasHistory ? (
-                              <Sparkline
-                                points={priceHistoryForMarket!.points}
-                              />
-                            ) : (
-                              <div className="h-[60px] bg-slate-900/20 rounded border border-dashed border-slate-900 flex items-center justify-center text-xs text-slate-600 italic">
-                                Price history not available
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Stats Grid */}
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-3.5 text-[11px] font-mono border-t md:border-t-0 md:border-l border-slate-900/60 pt-4 md:pt-0 md:pl-6">
-                            <div>
-                              <span className="text-slate-600 block mb-0.5">
-                                24h Vol
-                              </span>
-                              <span className="text-slate-300 font-medium">
-                                {m.volume_24h !== null
-                                  ? `$${m.volume_24h.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                                  : "--"}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-slate-600 block mb-0.5">
-                                Total Vol
-                              </span>
-                              <span className="text-slate-300 font-medium">
-                                {m.volume !== null
-                                  ? `$${m.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                                  : "--"}
-                              </span>
-                            </div>
-                            <div className="col-span-2">
-                              <span className="text-slate-600 block mb-0.5">
-                                Open Interest
-                              </span>
-                              <span className="text-slate-300 font-medium">
-                                {m.open_interest !== null
-                                  ? `$${m.open_interest.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                                  : "--"}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Expandable Rules */}
-                        {m.rules && (
-                          <div className="border-t border-slate-900 bg-slate-950/40">
-                            <button
-                              onClick={() => toggleRules(m.ticker)}
-                              className="w-full px-5 py-2.5 flex items-center justify-between text-xs text-slate-400 hover:text-slate-200 transition font-mono"
-                            >
-                              <span>CONTRACT DETAILS & RULES</span>
-                              {expandedRules[m.ticker] ? (
-                                <ChevronUp className="h-3.5 w-3.5" />
-                              ) : (
-                                <ChevronDown className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                            {expandedRules[m.ticker] && (
-                              <div className="px-5 pb-4 text-xs text-slate-400 leading-relaxed font-sans max-h-48 overflow-y-auto border-t border-slate-900/50 pt-3">
-                                {m.rules}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                {placeSuccess && (
+                  <div className="p-3.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400 space-y-1">
+                    <div className="flex items-center space-x-1.5 font-semibold">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>Successfully placed predictions!</span>
+                    </div>
+                    <p className="text-slate-400 mt-1">
+                      Event ID: <span className="text-emerald-300 font-mono">{placeSuccess.event_id}</span>
+                    </p>
+                    <p className="text-slate-400">
+                      Predictions inserted: <span className="text-emerald-300 font-mono font-bold">{placeSuccess.predictions_inserted}</span>
+                    </p>
+                    <p className="text-slate-400">
+                      Strategies upserted: <span className="text-emerald-300 font-mono font-bold">{placeSuccess.strategies_upserted}</span>
+                    </p>
+                  </div>
+                )}
               </div>
 
-              {/* Forecast History section */}
-              {detail.forecastHistory && detail.forecastHistory.length > 0 && (
-                <div className="space-y-4">
-                  <div className="flex items-center space-x-2 border-b border-slate-900 pb-2">
-                    <TrendingUp className="h-5 w-5 text-indigo-400" />
+              {/* Detail view sections tab bar */}
+              <div className="flex border-b border-slate-900 pb-px">
+                <button
+                  onClick={() => setDetailTab("markets")}
+                  className={`px-6 py-3 text-sm font-semibold border-b-2 tracking-wide transition cursor-pointer ${
+                    detailTab === "markets"
+                      ? "border-purple-500 text-purple-400 bg-purple-950/5"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Nested Markets ({detail.markets.length})
+                </button>
+                <button
+                  onClick={() => setDetailTab("leaderboard")}
+                  className={`px-6 py-3 text-sm font-semibold border-b-2 tracking-wide transition cursor-pointer ${
+                    detailTab === "leaderboard"
+                      ? "border-purple-500 text-purple-400 bg-purple-950/5"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  Event Leaderboard ({detail.leaderboard?.length ?? 0})
+                </button>
+              </div>
+
+              {detailTab === "markets" ? (
+                <>
+                  {/* Model Predictions Section */}
+                  {detail.predictions.length > 0 || detail.strategies.length > 0 ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center space-x-2 border-b border-slate-900 pb-2">
+                        <TrendingUp className="h-5 w-5 text-emerald-400" />
+                        <h3 className="text-base font-bold text-slate-200">
+                          Model Predictions
+                        </h3>
+                      </div>
+
+                      <div className="grid gap-4">
+                        {groupPredictionsByModel(detail.predictions, detail.strategies).map(
+                          (group) => (
+                            <div
+                              key={group.model_name}
+                              className="bg-slate-950 border border-slate-900 rounded-xl overflow-hidden"
+                            >
+                              <div className="px-5 py-3 bg-slate-900/40 border-b border-slate-900 flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-sm font-bold text-slate-100 font-mono">
+                                  {group.model_name}
+                                </span>
+                                {group.strategy_notes && (
+                                  <span className="text-xs text-slate-400 italic max-w-lg text-right">
+                                    "{group.strategy_notes}"
+                                  </span>
+                                )}
+                              </div>
+
+                              {group.bets.length === 0 ? (
+                                <div className="px-5 py-4 text-xs text-slate-500 italic">
+                                  No individual bets placed — strategy notes only.
+                                </div>
+                              ) : (
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left border-collapse text-xs">
+                                    <thead>
+                                      <tr className="bg-slate-900/20 text-slate-500 border-b border-slate-900 font-mono uppercase text-[10px]">
+                                        <th className="p-3">Market</th>
+                                        <th className="p-3">Bet</th>
+                                        <th className="p-3 text-right">Price</th>
+                                        <th className="p-3 text-right">Stake</th>
+                                        <th className="p-3 text-right">Outcome</th>
+                                        <th className="p-3">Justification</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-900/60">
+                                      {group.bets.map((bet) => {
+                                        const market = detail.markets.find(
+                                          (m) => m.ticker === bet.market_ticker,
+                                        );
+                                        return (
+                                          <tr
+                                            key={bet.id}
+                                            className="hover:bg-slate-900/20 transition align-top"
+                                          >
+                                            <td className="p-3 max-w-[220px]">
+                                              <div className="text-slate-200 font-medium leading-snug">
+                                                {market?.label || bet.market_ticker}
+                                              </div>
+                                              <div className="text-[10px] text-slate-600 font-mono mt-0.5">
+                                                {bet.market_ticker}
+                                              </div>
+                                            </td>
+                                            <td className="p-3">
+                                              <span
+                                                className={`px-2 py-0.5 rounded font-mono font-bold text-[11px] ${
+                                                  bet.side === "yes"
+                                                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                                    : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                                                }`}
+                                              >
+                                                {bet.side.toUpperCase()}
+                                              </span>
+                                            </td>
+                                            <td className="p-3 text-right font-mono text-slate-300">
+                                              {(bet.entry_price * 100).toFixed(0)}¢
+                                            </td>
+                                            <td className="p-3 text-right font-mono text-slate-300">
+                                              ${bet.stake.toFixed(2)}
+                                            </td>
+                                            <td className="p-3 text-right">
+                                              {getOutcomeBadge(bet.outcome, bet.payout)}
+                                            </td>
+                                            <td className="p-3 text-slate-400 max-w-xs">
+                                              {bet.justification}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Markets Section */}
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                      <div className="flex items-center space-x-2">
+                        <Activity className="h-5 w-5 text-purple-400" />
+                        <h3 className="text-base font-bold text-slate-200">
+                          Nested Markets ({detail.markets.length})
+                        </h3>
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        POINT-IN-TIME SNAPSHOT AS OF INGESTION
+                      </span>
+                    </div>
+
+                    <div className="grid gap-6">
+                      {detail.markets.map((m) => {
+                        const priceHistoryForMarket = detail.priceHistory.find(
+                          (h) => h.market_ticker === m.ticker,
+                        );
+                        const hasHistory =
+                          priceHistoryForMarket &&
+                          priceHistoryForMarket.points.length > 0;
+
+                        return (
+                          <div
+                            key={m.ticker}
+                            className="bg-slate-950 border border-slate-900 rounded-xl overflow-hidden hover:border-slate-800 transition"
+                          >
+                            {/* Market Card Top */}
+                            <div className="p-5 flex flex-col md:flex-row md:items-start justify-between gap-4">
+                              <div className="space-y-1 max-w-xl">
+                                <div className="flex items-center space-x-2">
+                                  <span className="text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-2 py-0.5 rounded font-mono font-semibold">
+                                    {m.ticker}
+                                  </span>
+                                  {m.status && (
+                                    <span
+                                      className={`px-1.5 py-0.5 text-[10px] font-semibold rounded font-mono ${
+                                        m.status === "active"
+                                          ? "bg-emerald-500/10 text-emerald-400"
+                                          : m.status === "settled"
+                                            ? "bg-blue-500/10 text-blue-400"
+                                            : "bg-slate-800 text-slate-400"
+                                      }`}
+                                    >
+                                      {m.status.toUpperCase()}
+                                    </span>
+                                  )}
+                                  {m.result && (
+                                    <span className="bg-purple-500/10 text-purple-400 border border-purple-500/20 px-1.5 py-0.5 text-[10px] font-bold rounded font-mono">
+                                      RESULT: {m.result.toUpperCase()}
+                                    </span>
+                                  )}
+                                </div>
+                                <h4 className="text-sm font-semibold text-slate-200 mt-2 font-sans">
+                                  {m.label || "Standard Market Option"}
+                                </h4>
+                              </div>
+
+                              {/* YES Option Pricing Indicator */}
+                              <div className="bg-slate-900/40 border border-slate-900 p-3 rounded-lg flex items-center space-x-4 min-w-[200px] justify-between">
+                                <div>
+                                  <span className="text-[10px] text-slate-500 block">
+                                    YES PRICE
+                                  </span>
+                                  <span className="text-lg font-bold text-white font-mono">
+                                    {m.yes_price !== null
+                                      ? `${(m.yes_price * 100).toFixed(0)}¢`
+                                      : "--"}
+                                  </span>
+                                </div>
+                                <div className="h-8 border-r border-slate-800" />
+                                <div className="text-right">
+                                  <span className="text-[10px] text-slate-500 block">
+                                    BID / ASK
+                                  </span>
+                                  <span className="text-xs font-mono font-medium text-slate-300">
+                                    {m.yes_bid !== null
+                                      ? `${(m.yes_bid * 100).toFixed(0)}¢`
+                                      : "--"}{" "}
+                                    /{" "}
+                                    {m.yes_ask !== null
+                                      ? `${(m.yes_ask * 100).toFixed(0)}¢`
+                                      : "--"}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Sparkline & Details Block */}
+                            <div className="px-5 pb-5 grid grid-cols-1 md:grid-cols-3 gap-6 pt-2 border-t border-slate-900/30">
+                              {/* Sparkline History */}
+                              <div className="md:col-span-2">
+                                <span className="text-[10px] text-slate-500 font-mono block mb-2">
+                                  PRICE TREND
+                                </span>
+                                {hasHistory ? (
+                                  <Sparkline
+                                    points={priceHistoryForMarket!.points}
+                                  />
+                                ) : (
+                                  <div className="h-[60px] bg-slate-900/20 rounded border border-dashed border-slate-900 flex items-center justify-center text-xs text-slate-600 italic">
+                                    Price history not available
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Stats Grid */}
+                              <div className="grid grid-cols-2 gap-x-4 gap-y-3.5 text-[11px] font-mono border-t md:border-t-0 md:border-l border-slate-900/60 pt-4 md:pt-0 md:pl-6">
+                                <div>
+                                  <span className="text-slate-600 block mb-0.5">
+                                    24h Vol
+                                  </span>
+                                  <span className="text-slate-300 font-medium">
+                                    {m.volume_24h !== null
+                                      ? `$${m.volume_24h.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                                      : "--"}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-600 block mb-0.5">
+                                    Total Vol
+                                  </span>
+                                  <span className="text-slate-300 font-medium">
+                                    {m.volume !== null
+                                      ? `$${m.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                                      : "--"}
+                                  </span>
+                                </div>
+                                <div className="col-span-2">
+                                  <span className="text-slate-600 block mb-0.5">
+                                    Open Interest
+                                  </span>
+                                  <span className="text-slate-300 font-medium">
+                                    {m.open_interest !== null
+                                      ? `$${m.open_interest.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                                      : "--"}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Expandable Rules */}
+                            {m.rules && (
+                              <div className="border-t border-slate-900 bg-slate-950/40">
+                                <button
+                                  onClick={() => toggleRules(m.ticker)}
+                                  className="w-full px-5 py-2.5 flex items-center justify-between text-xs text-slate-400 hover:text-slate-200 transition font-mono"
+                                >
+                                  <span>CONTRACT DETAILS & RULES</span>
+                                  {expandedRules[m.ticker] ? (
+                                    <ChevronUp className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <ChevronDown className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                                {expandedRules[m.ticker] && (
+                                  <div className="px-5 pb-4 text-xs text-slate-400 leading-relaxed font-sans max-h-48 overflow-y-auto border-t border-slate-900/50 pt-3">
+                                    {m.rules}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Forecast History section */}
+                  {detail.forecastHistory && detail.forecastHistory.length > 0 && (
+                    <div className="space-y-4">
+                      <div className="flex items-center space-x-2 border-b border-slate-900 pb-2">
+                        <TrendingUp className="h-5 w-5 text-indigo-400" />
+                        <h3 className="text-base font-bold text-slate-200">
+                          Kalshi Forecast Percentiles
+                        </h3>
+                      </div>
+
+                      <div className="overflow-x-auto border border-slate-900 rounded-xl bg-slate-950">
+                        <table className="w-full text-left border-collapse text-xs font-mono">
+                          <thead>
+                            <tr className="bg-slate-900/50 text-slate-400 border-b border-slate-900">
+                              <th className="p-3">Timeline (UTC)</th>
+                              {/* Extract unique percentiles to draw columns */}
+                              {detail.forecastHistory[0].percentile_points.map(
+                                (p) => (
+                                  <th key={p.percentile} className="p-3 text-right">
+                                    P{(p.percentile / 100).toFixed(0)}
+                                  </th>
+                                ),
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-900/60 text-slate-300">
+                            {detail.forecastHistory.map((snap) => (
+                              <tr
+                                key={snap.end_period_ts}
+                                className="hover:bg-slate-900/20 transition"
+                              >
+                                <td className="p-3 font-sans">
+                                  {new Date(snap.end_period_ts).toLocaleString()}
+                                </td>
+                                {snap.percentile_points.map((pt) => (
+                                  <td
+                                    key={pt.percentile}
+                                    className="p-3 text-right font-medium text-indigo-300"
+                                  >
+                                    {pt.formatted_forecast ||
+                                      pt.numerical_forecast ||
+                                      pt.raw_numerical_forecast ||
+                                      "--"}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                /* Event Leaderboard Section */
+                <div className="p-6 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-900 space-y-4">
+                  <div className="flex items-center space-x-2 pb-2 border-b border-slate-900">
+                    <Trophy className="h-5 w-5 text-purple-400" />
                     <h3 className="text-base font-bold text-slate-200">
-                      Kalshi Forecast Percentiles
+                      Event Leaderboard
                     </h3>
                   </div>
 
-                  <div className="overflow-x-auto border border-slate-900 rounded-xl bg-slate-950">
-                    <table className="w-full text-left border-collapse text-xs font-mono">
-                      <thead>
-                        <tr className="bg-slate-900/50 text-slate-400 border-b border-slate-900">
-                          <th className="p-3">Timeline (UTC)</th>
-                          {/* Extract unique percentiles to draw columns */}
-                          {detail.forecastHistory[0].percentile_points.map(
-                            (p) => (
-                              <th key={p.percentile} className="p-3 text-right">
-                                P{(p.percentile / 100).toFixed(0)}
-                              </th>
-                            ),
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-900/60 text-slate-300">
-                        {detail.forecastHistory.map((snap) => (
-                          <tr
-                            key={snap.end_period_ts}
-                            className="hover:bg-slate-900/20 transition"
-                          >
-                            <td className="p-3 font-sans">
-                              {new Date(snap.end_period_ts).toLocaleString()}
-                            </td>
-                            {snap.percentile_points.map((pt) => (
-                              <td
-                                key={pt.percentile}
-                                className="p-3 text-right font-medium text-indigo-300"
-                              >
-                                {pt.formatted_forecast ||
-                                  pt.numerical_forecast ||
-                                  pt.raw_numerical_forecast ||
-                                  "--"}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  {!detail.leaderboard || detail.leaderboard.length === 0 ? (
+                    <div className="p-8 text-center text-slate-500 text-xs italic">
+                      No model event results recorded yet. Settle the predictions to compute performance and payouts.
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="overflow-x-auto rounded-xl border border-slate-900 bg-slate-950/40">
+                        <table className="w-full text-left border-collapse text-xs font-mono">
+                          <thead>
+                            <tr className="bg-slate-900/50 text-slate-400 border-b border-slate-900 font-mono text-xs uppercase tracking-wider">
+                              <th className="p-3 w-16 text-center">Rank</th>
+                              <th className="p-3">Model</th>
+                              <th className="p-3 text-right">Starting Bal</th>
+                              <th className="p-3 text-right">Ending Bal</th>
+                              <th className="p-3 text-right">Percent Change</th>
+                              <th className="p-3 text-center">Predictions</th>
+                              <th className="p-3 text-center">Strategy Notes</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-900/60 text-slate-300">
+                            {detail.leaderboard.map((row) => {
+                              const isFirst = row.event_rank === 1;
+                              const isExpanded = !!expandedStrategies[row.model_name];
+                              const changeVal = row.percent_change;
+
+                              return (
+                                <Fragment key={row.model_name}>
+                                  <tr className="hover:bg-slate-900/10 transition">
+                                    <td className="p-3 text-center font-bold">
+                                      {isFirst ? "🥇" : row.event_rank === 2 ? "🥈" : row.event_rank === 3 ? "🥉" : row.event_rank}
+                                    </td>
+                                    <td className="p-3 font-sans font-semibold text-slate-200">
+                                      {row.model_name}
+                                    </td>
+                                    <td className="p-3 text-right">${row.starting_balance.toFixed(2)}</td>
+                                    <td className="p-3 text-right">
+                                      {row.ending_balance !== null ? `$${row.ending_balance.toFixed(2)}` : "--"}
+                                    </td>
+                                    <td className={`p-3 text-right font-bold ${changeVal !== null ? (changeVal > 0 ? "text-emerald-400" : changeVal < 0 ? "text-rose-400" : "text-slate-400") : "text-slate-400"}`}>
+                                      {changeVal !== null ? `${changeVal > 0 ? "+" : ""}${changeVal.toFixed(2)}%` : "--"}
+                                    </td>
+                                    <td className="p-3 text-center">{row.prediction_count}</td>
+                                    <td className="p-3 text-center font-sans">
+                                      {row.strategy_notes ? (
+                                        <button
+                                          onClick={() => setExpandedStrategies(prev => ({
+                                            ...prev,
+                                            [row.model_name]: !prev[row.model_name]
+                                          }))}
+                                          className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-[10px] font-semibold text-purple-400 hover:text-purple-300 transition cursor-pointer"
+                                        >
+                                          {isExpanded ? "Hide strategy" : "Show strategy"}
+                                        </button>
+                                      ) : (
+                                        <span className="text-slate-600 text-[10px] italic">No strategy</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                  {isExpanded && row.strategy_notes && (
+                                    <tr>
+                                      <td colSpan={7} className="p-4 bg-slate-950/80 border-t border-slate-900/50">
+                                        <div className="text-slate-400 text-xs font-sans leading-relaxed whitespace-pre-wrap pl-6 border-l-2 border-purple-500">
+                                          <p className="font-semibold text-slate-300 text-[10px] uppercase tracking-wider mb-1.5 font-mono">
+                                            Strategy Thesis:
+                                          </p>
+                                          {row.strategy_notes}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </Fragment>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -991,8 +1495,163 @@ export default function App() {
             </div>
           )}
         </section>
+          </>
+        ) : (
+          <section className="flex-1 flex flex-col bg-slate-950 overflow-y-auto p-6 md:p-8 space-y-6">
+            <div className="p-6 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-900 space-y-4 max-w-5xl mx-auto w-full">
+              <div className="flex items-center justify-between pb-4 border-b border-slate-900">
+                <div className="flex items-center space-x-3">
+                  <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center">
+                    <Trophy className="h-5 w-5 text-purple-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-100">LLM Tournament Standings</h2>
+                    <p className="text-xs text-slate-500 font-mono">Compounding capital leaderboards across all settled matches</p>
+                  </div>
+                </div>
+                <button
+                  onClick={fetchLifetimeLeaderboard}
+                  disabled={loadingLifetime}
+                  className="p-2 rounded-lg hover:bg-slate-900 border border-slate-900 text-slate-400 hover:text-white transition flex items-center space-x-1.5 text-xs font-semibold cursor-pointer disabled:opacity-55"
+                >
+                  {loadingLifetime ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  <span>Refresh Standings</span>
+                </button>
+              </div>
+
+              {loadingLifetime && lifetimeLeaderboard.length === 0 ? (
+                <div className="p-16 text-center text-slate-500 text-sm flex flex-col items-center justify-center space-y-2">
+                  <Loader2 className="h-8 w-8 animate-spin text-purple-500 mb-2" />
+                  <span>Loading lifetime leaderboard...</span>
+                </div>
+              ) : lifetimeError ? (
+                <div className="p-8 text-center text-xs text-rose-400">
+                  <AlertCircle className="mx-auto h-8 w-8 mb-2 text-rose-500" />
+                  <span>Failed to load standings: {lifetimeError}</span>
+                </div>
+              ) : lifetimeLeaderboard.length === 0 ? (
+                <div className="p-16 text-center text-slate-500 text-sm italic">
+                  No settled events or model standings available yet.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-slate-900 bg-slate-950/40">
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-slate-900/50 text-slate-400 border-b border-slate-900 font-mono text-xs">
+                        <th className="p-4 w-16 text-center">Rank</th>
+                        <th className="p-4">Agent Model</th>
+                        <th className="p-4 text-center">Matches Played</th>
+                        <th className="p-4 text-right">Avg Return</th>
+                        <th className="p-4 text-right">Total PnL</th>
+                        <th className="p-4 text-right">Rewards Earned</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-900/60 text-slate-300">
+                      {lifetimeLeaderboard.map((row) => {
+                        const isTop3 = row.lifetime_rank <= 3;
+                        const isFirst = row.lifetime_rank === 1;
+                        const pnlVal = Number(row.total_pnl);
+                        const rewardsVal = Number(row.total_rewards_earned);
+                        const avgReturn = Number(row.avg_percent_change);
+
+                        return (
+                          <tr key={row.model_name} className="hover:bg-slate-900/10 transition">
+                            <td className="p-4 text-center font-bold font-mono">
+                              {isFirst ? (
+                                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+                                  🥇
+                                </span>
+                              ) : row.lifetime_rank === 2 ? (
+                                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full bg-slate-400/10 border border-slate-400/30 text-slate-300 text-xs">
+                                  🥈
+                                </span>
+                              ) : row.lifetime_rank === 3 ? (
+                                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full bg-amber-700/10 border border-amber-700/30 text-amber-600 text-xs">
+                                  🥉
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">{row.lifetime_rank}</span>
+                              )}
+                            </td>
+                            <td className="p-4 font-semibold text-slate-100 flex items-center space-x-2">
+                              <span className={isTop3 ? "text-purple-400" : ""}>
+                                {row.model_name}
+                              </span>
+                            </td>
+                            <td className="p-4 text-center font-mono text-slate-400">
+                              {row.events_participated}
+                            </td>
+                            <td className={`p-4 text-right font-mono font-medium ${avgReturn > 0 ? "text-emerald-400" : avgReturn < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                              {avgReturn > 0 ? "+" : ""}{avgReturn.toFixed(2)}%
+                            </td>
+                            <td className={`p-4 text-right font-mono font-medium ${pnlVal > 0 ? "text-emerald-400" : pnlVal < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                              {pnlVal > 0 ? "+" : ""}${pnlVal.toFixed(2)}
+                            </td>
+                            <td className="p-4 text-right font-mono font-bold text-indigo-400">
+                              ${rewardsVal.toFixed(2)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
       </main>
     </div>
+  );
+}
+
+// Groups flat predictions + strategy notes by model, sorted alphabetically
+function groupPredictionsByModel(predictions: Prediction[], strategies: Strategy[]) {
+  const notesByModel = new Map(strategies.map((s) => [s.model_name, s.strategy_notes]));
+  const modelNames = new Set([
+    ...predictions.map((p) => p.model_name),
+    ...strategies.map((s) => s.model_name),
+  ]);
+
+  return [...modelNames].sort().map((model_name) => ({
+    model_name,
+    strategy_notes: notesByModel.get(model_name) || null,
+    bets: predictions.filter((p) => p.model_name === model_name),
+  }));
+}
+
+// Renders a colored badge for a prediction's outcome, including payout when settled
+function getOutcomeBadge(outcome: string, payout: number | null) {
+  const base = "px-2 py-0.5 rounded font-mono font-bold text-[11px] border";
+  if (outcome === "win") {
+    return (
+      <span className={`${base} bg-emerald-500/10 text-emerald-400 border-emerald-500/20`}>
+        WIN{payout !== null ? ` +$${payout.toFixed(2)}` : ""}
+      </span>
+    );
+  }
+  if (outcome === "loss") {
+    return (
+      <span className={`${base} bg-rose-500/10 text-rose-400 border-rose-500/20`}>
+        LOSS
+      </span>
+    );
+  }
+  if (outcome === "void") {
+    return (
+      <span className={`${base} bg-slate-800 text-slate-400 border-slate-700`}>
+        VOID
+      </span>
+    );
+  }
+  return (
+    <span className={`${base} bg-yellow-500/10 text-yellow-400 border-yellow-500/20`}>
+      PENDING
+    </span>
   );
 }
 

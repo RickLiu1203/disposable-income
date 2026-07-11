@@ -96,6 +96,37 @@ interface ForecastSummaryRow {
   formatted_forecast: string | null;
 }
 
+interface PredictionRow {
+  id: number;
+  model_name: string;
+  market_ticker: string;
+  event_ticker: string;
+  side: "yes" | "no";
+  stake: number;
+  entry_price: number;
+  justification: string;
+  outcome: string;
+  payout: number | null;
+  placed_at: string;
+  settled_at: string | null;
+}
+
+interface StrategyRow {
+  model_name: string;
+  strategy_notes: string;
+  created_at: string;
+}
+
+export interface EventLeaderboardRow {
+  model_name: string;
+  starting_balance: number;
+  ending_balance: number | null;
+  percent_change: number | null;
+  event_rank: number;
+  prediction_count: number;
+  strategy_notes: string | null;
+}
+
 export interface EventDetail {
   event: {
     id: string;
@@ -121,6 +152,9 @@ export interface EventDetail {
       formatted_forecast: string | null;
     }>;
   }>;
+  predictions: PredictionRow[];
+  strategies: StrategyRow[];
+  leaderboard: EventLeaderboardRow[];
 }
 
 export async function getEventDetail(eventId: string): Promise<EventDetail | null> {
@@ -211,6 +245,49 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
   }
   const forecastHistory = [...bySnapshot.values()];
 
+  // Load per-model predictions (bets placed) for this consolidated event
+  const { data: predictionRows, error: predictionsError } = await supabase
+    .from("predictions")
+    .select("id, model_name, market_ticker, event_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at")
+    .eq("event_id", eventId)
+    .order("model_name", { ascending: true })
+    .order("placed_at", { ascending: true });
+  if (predictionsError) {
+    throw new Error(`Failed to load predictions for event ${eventId}: ${predictionsError.message}`);
+  }
+
+  // Load per-model strategy notes for this consolidated event
+  const { data: strategyRows, error: strategiesError } = await supabase
+    .from("model_event_strategies")
+    .select("model_name, strategy_notes, created_at")
+    .eq("event_id", eventId);
+  if (strategiesError) {
+    throw new Error(`Failed to load strategy notes for event ${eventId}: ${strategiesError.message}`);
+  }
+
+  // Load event leaderboard
+  const { data: leaderboardRows, error: leaderboardError } = await supabase
+    .from("event_leaderboard")
+    .select("model_name, starting_balance, ending_balance, percent_change, event_rank, prediction_count")
+    .eq("event_id", eventId)
+    .order("event_rank", { ascending: true });
+  if (leaderboardError) {
+    throw new Error(`Failed to load event leaderboard for event ${eventId}: ${leaderboardError.message}`);
+  }
+
+  const leaderboard = (leaderboardRows ?? []).map((row) => {
+    const strategy = (strategyRows ?? []).find((s) => s.model_name === row.model_name);
+    return {
+      model_name: row.model_name,
+      starting_balance: Number(row.starting_balance),
+      ending_balance: row.ending_balance !== null ? Number(row.ending_balance) : null,
+      percent_change: row.percent_change !== null ? Number(row.percent_change) : null,
+      event_rank: Number(row.event_rank),
+      prediction_count: Number(row.prediction_count),
+      strategy_notes: strategy ? strategy.strategy_notes : null,
+    };
+  });
+
   return {
     event: {
       id: event.id,
@@ -227,5 +304,29 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
     markets: (markets ?? []) as MarketRow[],
     priceHistory,
     forecastHistory,
+    predictions: (predictionRows ?? []) as PredictionRow[],
+    strategies: (strategyRows ?? []) as StrategyRow[],
+    leaderboard,
   };
+}
+
+export interface LifetimeLeaderboardRow {
+  model_name: string;
+  events_participated: number;
+  avg_percent_change: number;
+  total_pnl: number;
+  total_rewards_earned: number;
+  lifetime_rank: number;
+}
+
+export async function getLifetimeLeaderboard(): Promise<LifetimeLeaderboardRow[]> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("lifetime_leaderboard")
+    .select("*")
+    .order("lifetime_rank", { ascending: true });
+  if (error) {
+    throw new Error(`Failed to load lifetime leaderboard: ${error.message}`);
+  }
+  return (data ?? []) as LifetimeLeaderboardRow[];
 }

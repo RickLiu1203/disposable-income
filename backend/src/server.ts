@@ -4,7 +4,7 @@ import swaggerUi from "swagger-ui-express";
 import { getExchangeStatus } from "./kalshi/kalshi";
 import { getEventBundle, resolveKalshiMarketUrl, getMilestoneRelatedTickers } from "./kalshi/kalshiEvents";
 import { EventAlreadyIngestedError, ingestKalshiEvent } from "./kalshi/kalshiIngest";
-import { getEventDetail, listEvents } from "./events/eventsRead";
+import { getEventDetail, listEvents, getLifetimeLeaderboard } from "./events/eventsRead";
 import { deleteEvent } from "./events/eventsDelete";
 import { settleEvent } from "./kalshi/kalshiSettle";
 import { getServerTime } from "./polymarket/polymarket";
@@ -16,7 +16,7 @@ import {
   toCompactMatchBundle,
 } from "./polymarket/polymarketEvents";
 import { openapiSpec } from "./docs/openapi";
-import { placeBulkPredictions, PredictionValidationError } from "./predictions/predictionsPlace";
+import { placeModelPredictions, PredictionValidationError } from "./predictions/predictionsPlace";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -282,6 +282,18 @@ app.delete("/events", async (req, res) => {
   }
 });
 
+app.get("/events/lifetime-leaderboard", async (_req, res) => {
+  try {
+    const data = await getLifetimeLeaderboard();
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
 app.get("/events/detail", async (req, res) => {
   const eventTicker = req.query.event_ticker;
   const eventId = req.query.event_id;
@@ -392,19 +404,18 @@ app.post("/predictions/place", async (req, res) => {
   const body = req.body;
 
   if (
-    typeof body?.event_ticker !== "string" ||
-    !Array.isArray(body?.models) ||
-    body.models.length === 0
+    typeof body?.event_id !== "string" ||
+    typeof body?.model_name !== "string"
   ) {
     res.status(400).json({
       ok: false,
-      error: "Body must include 'event_ticker' (string) and a non-empty 'models' array",
+      error: "Body must include 'event_id' (string) and 'model_name' (string)",
     });
     return;
   }
 
   try {
-    const data = await placeBulkPredictions(body);
+    const data = await placeModelPredictions(body);
     res.json({ ok: true, data });
   } catch (error) {
     if (error instanceof PredictionValidationError) {

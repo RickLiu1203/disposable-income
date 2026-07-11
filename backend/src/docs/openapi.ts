@@ -586,6 +586,22 @@ export const openapiSpec = {
                         priceHistory: { type: "array", items: { type: "object" } },
                         forecastHistory: { type: "array", items: { type: "object" } },
                         relatedEvents: { type: "array", items: { type: "object" } },
+                        predictions: {
+                          type: "array",
+                          items: { type: "object" },
+                          description:
+                            "Every model prediction placed against this consolidated event: model_name, market_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at.",
+                        },
+                        strategies: {
+                          type: "array",
+                          items: { type: "object" },
+                          description: "Per-model overall strategy notes for this consolidated event: model_name, strategy_notes, created_at.",
+                        },
+                        leaderboard: {
+                          type: "array",
+                          items: { type: "object" },
+                          description: "Event-level leaderboard for participating models: model_name, starting_balance, ending_balance, percent_change, event_rank, prediction_count, strategy_notes.",
+                        },
                       },
                     },
                   },
@@ -616,6 +632,55 @@ export const openapiSpec = {
                   properties: {
                     ok: { type: "boolean", example: false },
                     error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/events/lifetime-leaderboard": {
+      get: {
+        summary: "Retrieve the global lifetime leaderboard across all models",
+        description: "Queries the lifetime_leaderboard view and returns aggregate model standings sorted by rank.",
+        responses: {
+          "200": {
+            description: "Lifetime leaderboard retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          model_name: { type: "string" },
+                          events_participated: { type: "number" },
+                          avg_percent_change: { type: "number" },
+                          total_pnl: { type: "number" },
+                          total_rewards_earned: { type: "number" },
+                          lifetime_rank: { type: "number" },
+                        },
+                      },
+                    },
                   },
                 },
               },
