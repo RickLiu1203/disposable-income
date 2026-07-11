@@ -2,12 +2,13 @@ import "dotenv/config";
 import express from "express";
 import swaggerUi from "swagger-ui-express";
 import { getExchangeStatus } from "./kalshi/kalshi";
-import { getEventBundle, resolveKalshiMarketUrl } from "./kalshi/kalshiEvents";
+import { getEventBundle, resolveKalshiMarketUrl, getMilestoneRelatedTickers } from "./kalshi/kalshiEvents";
 import { EventAlreadyIngestedError, ingestKalshiEvent } from "./kalshi/kalshiIngest";
 import { getEventDetail, listEvents } from "./events/eventsRead";
+import { deleteEvent } from "./events/eventsDelete";
 import { settleEvent } from "./kalshi/kalshiSettle";
 import { getServerTime } from "./polymarket/polymarket";
-import { pingSupabase } from "./supabase/supabaseClient";
+import { pingSupabase, getSupabaseClient } from "./supabase/supabaseClient";
 import {
   findMatchEvents,
   getMatchBundle,
@@ -180,7 +181,50 @@ app.post("/kalshi/add-event", async (req, res) => {
         .map(Number)
     : undefined;
 
+  const ingestAllProps = req.query.ingest_all_props === "true";
+
   try {
+    if (ingestAllProps) {
+      const tickers = await getMilestoneRelatedTickers(seriesTicker, eventTicker);
+      const results: any[] = [];
+      const errors: string[] = [];
+
+      for (const ticker of tickers) {
+        const resolvedSeries = ticker.split("-")[0];
+        try {
+          const result = await ingestKalshiEvent(resolvedSeries, ticker, {
+            startTs,
+            endTs,
+            periodInterval,
+            percentiles,
+          });
+          results.push(result);
+        } catch (error) {
+          // If some sibling is already ingested, that's fine. Ignore 409s.
+          if (error instanceof EventAlreadyIngestedError) {
+            results.push({ event_ticker: ticker, status: "already_ingested" });
+          } else {
+            console.error(`Failed to ingest sibling event ${ticker}:`, error);
+            errors.push(error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+
+      if (results.length === 0 && errors.length > 0) {
+        throw new Error(`Failed to ingest any match events: ${errors.join("; ")}`);
+      }
+
+      res.json({
+        ok: true,
+        event_ticker: eventTicker,
+        series_ticker: seriesTicker,
+        ingested_count: results.length,
+        results,
+        partial_errors: errors.length > 0 ? errors : undefined,
+      });
+      return;
+    }
+
     const data = await ingestKalshiEvent(seriesTicker, eventTicker, {
       startTs,
       endTs,
@@ -212,18 +256,64 @@ app.get("/events", async (_req, res) => {
   }
 });
 
+app.delete("/events", async (req, res) => {
+  const eventTicker = req.query.event_ticker;
+  const eventId = req.query.event_id;
+
+  if (typeof eventTicker !== "string" && typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_ticker' or 'event_id' is required" });
+    return;
+  }
+
+  const target = (eventId || eventTicker) as string;
+
+  try {
+    const data = await deleteEvent(target);
+    res.json({ ok: true, data });
+  } catch (error) {
+    if (error instanceof Error && (error.message.includes("not found") || error.message.includes("not exist"))) {
+      res.status(404).json({ ok: false, error: error.message });
+      return;
+    }
+    res.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
 app.get("/events/detail", async (req, res) => {
   const eventTicker = req.query.event_ticker;
+  const eventId = req.query.event_id;
 
-  if (typeof eventTicker !== "string") {
-    res.status(400).json({ ok: false, error: "Query param 'event_ticker' is required" });
+  if (typeof eventTicker !== "string" && typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_ticker' or 'event_id' is required" });
     return;
   }
 
   try {
-    const data = await getEventDetail(eventTicker);
+    let targetEventId = eventId as string;
+    if (!targetEventId && typeof eventTicker === "string") {
+      const supabase = getSupabaseClient();
+      const { data: tickerRow } = await supabase
+        .from("event_tickers")
+        .select("event_id")
+        .eq("event_ticker", eventTicker)
+        .maybeSingle();
+
+      if (tickerRow) {
+        targetEventId = tickerRow.event_id;
+      }
+    }
+
+    if (!targetEventId) {
+      res.status(404).json({ ok: false, error: `No ingested event found for ticker '${eventTicker}'` });
+      return;
+    }
+
+    const data = await getEventDetail(targetEventId);
     if (!data) {
-      res.status(404).json({ ok: false, error: `No ingested event found for '${eventTicker}'` });
+      res.status(404).json({ ok: false, error: `No ingested event found for ID '${targetEventId}'` });
       return;
     }
     res.json({ ok: true, data });
@@ -237,15 +327,59 @@ app.get("/events/detail", async (req, res) => {
 
 app.post("/predictions/settle", async (req, res) => {
   const eventTicker = req.query.event_ticker;
+  const eventId = req.query.event_id;
 
-  if (typeof eventTicker !== "string") {
-    res.status(400).json({ ok: false, error: "Query param 'event_ticker' is required" });
+  if (typeof eventTicker !== "string" && typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_ticker' or 'event_id' is required" });
     return;
   }
 
   try {
-    const data = await settleEvent(eventTicker);
-    res.json({ ok: true, data });
+    const supabase = getSupabaseClient();
+    let targetEventId = eventId as string;
+
+    if (!targetEventId && typeof eventTicker === "string") {
+      const { data: tickerRow } = await supabase
+        .from("event_tickers")
+        .select("event_id")
+        .eq("event_ticker", eventTicker)
+        .maybeSingle();
+      if (tickerRow) {
+        targetEventId = tickerRow.event_id;
+      }
+    }
+
+    if (!targetEventId) {
+      res.status(404).json({ ok: false, error: `No ingested event found for ticker '${eventTicker}'` });
+      return;
+    }
+
+    // Load all sibling tickers for this parent event
+    const { data: siblingTickers, error: siblingError } = await supabase
+      .from("event_tickers")
+      .select("event_ticker")
+      .eq("event_id", targetEventId);
+
+    if (siblingError || !siblingTickers || siblingTickers.length === 0) {
+      throw new Error(`Failed to load sibling tickers for event ${targetEventId}: ${siblingError?.message || 'none found'}`);
+    }
+
+    const results: any[] = [];
+    for (const row of siblingTickers) {
+      const result = await settleEvent(row.event_ticker);
+      results.push(result);
+    }
+
+    const combined = {
+      event_id: targetEventId,
+      predictions_checked: results.reduce((sum, r) => sum + r.predictions_checked, 0),
+      predictions_settled: results.reduce((sum, r) => sum + r.predictions_settled, 0),
+      predictions_still_pending: results.reduce((sum, r) => sum + r.predictions_still_pending, 0),
+      models_finalized: Array.from(new Set(results.flatMap((r) => r.models_finalized))),
+      event_payouts_computed: results.some((r) => r.event_payouts_computed),
+    };
+
+    res.json({ ok: true, data: combined });
   } catch (error) {
     res.status(502).json({
       ok: false,

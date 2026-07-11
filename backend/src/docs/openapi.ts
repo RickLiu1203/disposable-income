@@ -307,6 +307,14 @@ export const openapiSpec = {
             description:
               "Comma-separated percentiles on a 0-9999 scale (e.g. 5000 = 50th); default 1000,2500,5000,7500,9000",
           },
+          {
+            name: "ingest_all_props",
+            in: "query",
+            required: false,
+            schema: { type: "boolean" },
+            description:
+              "If true, resolves the sports match milestone and automatically ingests all related sibling event tickers (moneyline, spread, totals, correct score, etc.) in a single call.",
+          },
         ],
         responses: {
           "200": {
@@ -422,6 +430,109 @@ export const openapiSpec = {
                         },
                       },
                     },
+                  },
+                },
+              },
+            },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      delete: {
+        summary: "Delete (nuke) one ingested event and all its related records from the database",
+        description:
+          "Deletes the event and all matching predictions, model results, model strategies, payouts, forecast percentiles, forecast snapshots, related events, markets, and market price history from Supabase.",
+        parameters: [
+          {
+            name: "event_ticker",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "Kalshi event ticker of the event to nuke.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Event and all related records deleted successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        event_ticker: { type: "string" },
+                        predictions_deleted: { type: "number" },
+                        model_results_deleted: { type: "number" },
+                        model_strategies_deleted: { type: "number" },
+                        payouts_deleted: { type: "number" },
+                        forecast_percentiles_deleted: { type: "number" },
+                        forecast_snapshots_deleted: { type: "number" },
+                        related_events_deleted: { type: "number" },
+                        market_price_history_deleted: { type: "number" },
+                        markets_deleted: { type: "number" },
+                        event_deleted: { type: "boolean" },
+                      },
+                    },
+                  },
+                },
+                example: {
+                  ok: true,
+                  data: {
+                    event_ticker: "KXWCADVANCE-26JUL11NORENG",
+                    predictions_deleted: 1,
+                    model_results_deleted: 1,
+                    model_strategies_deleted: 1,
+                    payouts_deleted: 0,
+                    forecast_percentiles_deleted: 0,
+                    forecast_snapshots_deleted: 0,
+                    related_events_deleted: 0,
+                    market_price_history_deleted: 96,
+                    markets_deleted: 2,
+                    event_deleted: true,
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_ticker' query param",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "Event not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
                   },
                 },
               },

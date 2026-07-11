@@ -1,5 +1,5 @@
 import { getSupabaseClient } from "../supabase/supabaseClient";
-import { getEventBundle, type CompactMarket, type EventBundleOptions } from "./kalshiEvents";
+import { getEventBundle, type CompactMarket, type EventBundleOptions, getMilestoneId } from "./kalshiEvents";
 
 // ---------------------------------------------------------------------------
 // Writes one Kalshi event's compact bundle into Supabase across
@@ -30,12 +30,12 @@ export class EventAlreadyIngestedError extends Error {
 }
 
 export interface IngestResult {
+  event_id: string;
   event_ticker: string;
   series_ticker: string;
   markets: number;
   price_history_points: number;
   forecast_percentiles: number;
-  related_events: number;
   partialErrors?: Record<string, string>;
 }
 
@@ -72,16 +72,31 @@ export async function ingestKalshiEvent(
 ): Promise<IngestResult> {
   const supabase = getSupabaseClient();
 
+  // Check if sibling ticker is already ingested
   const { data: existing, error: existingError } = await supabase
-    .from("events")
-    .select("event_ticker")
+    .from("event_tickers")
+    .select("event_ticker, event_id")
     .eq("event_ticker", eventTicker)
     .maybeSingle();
   if (existingError) {
-    throw new Error(`Failed to check for existing event ${eventTicker}: ${existingError.message}`);
+    throw new Error(`Failed to check for existing ticker ${eventTicker}: ${existingError.message}`);
   }
   if (existing) {
     throw new EventAlreadyIngestedError(eventTicker);
+  }
+
+  // Resolve target combined event UUID (Milestone ID)
+  const eventId = await getMilestoneId(seriesTicker, eventTicker);
+
+  // Check if parent event already exists
+  const { data: existingEvent, error: eventCheckError } = await supabase
+    .from("events")
+    .select("id")
+    .eq("id", eventId)
+    .maybeSingle();
+
+  if (eventCheckError) {
+    throw new Error(`Failed to check for existing event ${eventId}: ${eventCheckError.message}`);
   }
 
   const bundle = await getEventBundle(seriesTicker, eventTicker, opts);
@@ -91,27 +106,56 @@ export async function ingestKalshiEvent(
   );
   const status = deriveEventStatus(bundle.markets);
 
-  const { error: eventInsertError } = await supabase.from("events").insert({
-    event_ticker: bundle.event.ticker,
+  if (!existingEvent) {
+    // Insert new parent event
+    const { error: eventInsertError } = await supabase.from("events").insert({
+      id: eventId,
+      event_name: bundle.event.title,
+      sub_title: bundle.event.sub_title ?? null,
+      competition: bundle.event.competition ?? null,
+      competition_scope: bundle.event.competition_scope ?? null,
+      open_time: openTime,
+      close_time: closeTime,
+      status,
+    });
+    if (eventInsertError) {
+      if (eventInsertError.code === "23505") {
+        // Race condition fallback
+      } else {
+        throw new Error(`Failed to insert event ${eventId}: ${eventInsertError.message}`);
+      }
+    }
+  } else {
+    // Update parent event's bounding window times
+    const { data: currentEvent } = await supabase.from("events").select("open_time, close_time").eq("id", eventId).single();
+    if (currentEvent) {
+      const newOpen = minMaxIso([currentEvent.open_time, openTime]).min;
+      const newClose = minMaxIso([currentEvent.close_time, closeTime]).max;
+      await supabase.from("events").update({
+        open_time: newOpen,
+        close_time: newClose,
+      }).eq("id", eventId);
+    }
+  }
+
+  // Insert sibling ticker entry
+  const { error: tickerInsertError } = await supabase.from("event_tickers").insert({
+    event_id: eventId,
+    event_ticker: eventTicker,
     series_ticker: seriesTicker,
-    event_name: bundle.event.title,
-    sub_title: bundle.event.sub_title ?? null,
-    competition: bundle.event.competition ?? null,
-    competition_scope: bundle.event.competition_scope ?? null,
-    open_time: openTime,
-    close_time: closeTime,
-    status,
+    title: bundle.event.title,
   });
-  if (eventInsertError) {
-    if (eventInsertError.code === "23505") {
+  if (tickerInsertError) {
+    if (tickerInsertError.code === "23505") {
       throw new EventAlreadyIngestedError(eventTicker);
     }
-    throw new Error(`Failed to insert event ${eventTicker}: ${eventInsertError.message}`);
+    throw new Error(`Failed to insert ticker ${eventTicker}: ${tickerInsertError.message}`);
   }
 
   if (bundle.markets.length > 0) {
     const marketRows = bundle.markets.map((m) => ({
       ticker: m.ticker,
+      event_id: eventId,
       event_ticker: eventTicker,
       label: m.label ?? null,
       status: m.status ?? null,
@@ -135,16 +179,31 @@ export async function ingestKalshiEvent(
   let priceHistoryPoints = 0;
   if (bundle.priceHistory && bundle.priceHistory.length > 0 && bundle.priceHistoryPeriodInterval) {
     const periodInterval = bundle.priceHistoryPeriodInterval;
-    const priceRows = bundle.priceHistory.flatMap((series) =>
-      series.points.map((p) => ({
+    const priceRows = bundle.priceHistory.flatMap((series) => {
+      const rawPoints = series.points.filter((p) => p.price != null);
+      const stride = 20;
+      const downsampled: typeof rawPoints = [];
+      for (let i = 0; i < rawPoints.length; i += stride) {
+        downsampled.push(rawPoints[i]);
+      }
+      const lastPoint = rawPoints[rawPoints.length - 1];
+      if (
+        rawPoints.length > 0 &&
+        (downsampled.length === 0 || downsampled[downsampled.length - 1].t !== lastPoint.t)
+      ) {
+        downsampled.push(lastPoint);
+      }
+
+      return downsampled.map((p) => ({
         market_ticker: series.market_ticker,
+        event_id: eventId,
         period_end_ts: toIsoFromUnixSeconds(p.t),
         period_interval: periodInterval,
         price: p.price,
         volume: p.volume,
         open_interest: p.open_interest,
-      }))
-    );
+      }));
+    });
     if (priceRows.length > 0) {
       const { error: priceHistoryError } = await supabase.from("market_price_history").insert(priceRows);
       if (priceHistoryError) {
@@ -156,16 +215,8 @@ export async function ingestKalshiEvent(
 
   let forecastPercentiles = 0;
   if (bundle.forecastHistory && bundle.forecastHistory.length > 0) {
-    // NOTE: Kalshi's forecast_percentile_history request takes start/end in
-    // milliseconds (unlike the candlestick endpoint, which takes seconds),
-    // and this codebase hasn't been able to confirm empirically whether the
-    // response's end_period_ts follows the request's unit (ms) or the
-    // candlestick precedent (seconds) — every numeric-scalar event tried
-    // during implementation 400'd on this endpoint. Assuming milliseconds
-    // here (matching the request unit); if forecast snapshot timestamps
-    // come out obviously wrong (e.g. in 1970 or thousands of years out),
-    // flip this to unix-seconds conversion instead.
     const snapshotRows = bundle.forecastHistory.map((f) => ({
+      event_id: eventId,
       event_ticker: eventTicker,
       end_period_ts: new Date(f.end_period_ts).toISOString(),
       period_interval: f.period_interval,
@@ -177,6 +228,7 @@ export async function ingestKalshiEvent(
 
     const percentileRows = bundle.forecastHistory.flatMap((f) =>
       f.percentile_points.map((p) => ({
+        event_id: eventId,
         event_ticker: eventTicker,
         end_period_ts: new Date(f.end_period_ts).toISOString(),
         percentile: p.percentile,
@@ -196,31 +248,13 @@ export async function ingestKalshiEvent(
     }
   }
 
-  let relatedEvents = 0;
-  if (bundle.multivariateEvents && bundle.multivariateEvents.length > 0) {
-    const relatedRows = bundle.multivariateEvents
-      .filter((e) => e.event_ticker !== eventTicker)
-      .map((e) => ({
-        event_ticker: eventTicker,
-        related_event_ticker: e.event_ticker,
-        related_title: e.title,
-      }));
-    if (relatedRows.length > 0) {
-      const { error: relatedError } = await supabase.from("event_related_events").insert(relatedRows);
-      if (relatedError) {
-        throw new Error(`Failed to insert related events for ${eventTicker}: ${relatedError.message}`);
-      }
-      relatedEvents = relatedRows.length;
-    }
-  }
-
   return {
+    event_id: eventId,
     event_ticker: eventTicker,
     series_ticker: seriesTicker,
     markets: bundle.markets.length,
     price_history_points: priceHistoryPoints,
     forecast_percentiles: forecastPercentiles,
-    related_events: relatedEvents,
     partialErrors: bundle.partialErrors,
   };
 }

@@ -85,34 +85,39 @@ export async function placeBulkPredictions(
   const supabase = getSupabaseClient();
   const eventTicker = config.event_ticker;
 
-  const { data: eventRow, error: eventError } = await supabase
-    .from("events")
-    .select("event_ticker")
+  // Resolve parent event_id and confirm the sibling ticker exists
+  const { data: tickerRow, error: tickerError } = await supabase
+    .from("event_tickers")
+    .select("event_id, event_ticker")
     .eq("event_ticker", eventTicker)
     .maybeSingle();
-  if (eventError) {
-    throw new Error(`Failed to look up event ${eventTicker}: ${eventError.message}`);
+
+  if (tickerError) {
+    throw new Error(`Failed to resolve event ticker ${eventTicker}: ${tickerError.message}`);
   }
-  if (!eventRow) {
+  if (!tickerRow) {
     throw new PredictionValidationError(
-      `Event not found: ${eventTicker}. Ingest it first via POST /kalshi/add-event.`,
-      [{ model_name: "*", field: "event_ticker", message: `Event ${eventTicker} has not been ingested` }]
+      `Event ticker not found: ${eventTicker}. Ingest it first via POST /kalshi/add-event.`,
+      [{ model_name: "*", field: "event_ticker", message: `Event ticker ${eventTicker} has not been ingested` }]
     );
   }
+  const eventId = tickerRow.event_id;
 
+  // Load all markets for this consolidated parent event to validate predictions across all sibling bets
   const { data: marketRows, error: marketsError } = await supabase
     .from("markets")
-    .select("ticker, yes_price")
-    .eq("event_ticker", eventTicker);
+    .select("ticker, event_ticker, yes_price")
+    .eq("event_id", eventId);
   if (marketsError) {
-    throw new Error(`Failed to load markets for ${eventTicker}: ${marketsError.message}`);
+    throw new Error(`Failed to load markets for event ${eventId}: ${marketsError.message}`);
   }
-  const marketPrices = new Map<string, number | null>(
-    ((marketRows ?? []) as { ticker: string; yes_price: number | null }[]).map((m) => [
-      m.ticker,
-      m.yes_price,
-    ])
-  );
+
+  const marketPrices = new Map<string, number | null>();
+  const marketToTicker = new Map<string, string>();
+  for (const m of (marketRows ?? []) as { ticker: string; event_ticker: string; yes_price: number | null }[]) {
+    marketPrices.set(m.ticker, m.yes_price);
+    marketToTicker.set(m.ticker, m.event_ticker);
+  }
 
   const { data: modelRows, error: modelsError } = await supabase.from("models").select("model_name");
   if (modelsError) {
@@ -121,8 +126,18 @@ export async function placeBulkPredictions(
   const knownModels = new Set(((modelRows ?? []) as { model_name: string }[]).map((m) => m.model_name));
 
   const details: PredictionValidationDetail[] = [];
-  const predictionRows: Omit<InsertedPrediction, "id" | "outcome" | "placed_at">[] = [];
-  const strategyRows: { model_name: string; event_ticker: string; strategy_notes: string }[] = [];
+  const predictionRows: Array<{
+    model_name: string;
+    event_id: string;
+    event_ticker: string;
+    market_ticker: string;
+    side: "yes" | "no";
+    stake: number;
+    entry_price: number;
+    justification: string;
+  }>[] = [];
+
+  const strategyRows: { model_name: string; event_id: string; strategy_notes: string }[] = [];
 
   for (const entry of config.models) {
     const modelName = entry.model_name;
@@ -149,7 +164,7 @@ export async function placeBulkPredictions(
       if (!isNonEmptyString(entry.strategy_notes)) {
         details.push({ model_name: modelName, field: "strategy_notes", message: "strategy_notes must be a non-empty string" });
       } else {
-        strategyRows.push({ model_name: modelName, event_ticker: eventTicker, strategy_notes: entry.strategy_notes });
+        strategyRows.push({ model_name: modelName, event_id: eventId, strategy_notes: entry.strategy_notes });
       }
     }
 
@@ -157,6 +172,7 @@ export async function placeBulkPredictions(
       if (!Array.isArray(entry.predictions) || entry.predictions.length === 0) {
         details.push({ model_name: modelName, field: "predictions", message: "predictions must be a non-empty array" });
       } else {
+        const modelPredictionRows: any[] = [];
         entry.predictions.forEach((prediction, index) => {
           const { market_ticker: marketTicker, side, stake, justification } = prediction ?? ({} as PredictionInput);
 
@@ -165,7 +181,7 @@ export async function placeBulkPredictions(
               model_name: modelName,
               index,
               field: "market_ticker",
-              message: `Market ${marketTicker} does not belong to event ${eventTicker} (or does not exist)`,
+              message: `Market ${marketTicker} does not belong to consolidated event ${eventId} (or does not exist)`,
             });
             return;
           }
@@ -203,8 +219,11 @@ export async function placeBulkPredictions(
             return;
           }
 
-          predictionRows.push({
+          const resolvedTicker = marketToTicker.get(marketTicker)!;
+          modelPredictionRows.push({
             model_name: modelName,
+            event_id: eventId,
+            event_ticker: resolvedTicker,
             market_ticker: marketTicker,
             side,
             stake,
@@ -212,6 +231,7 @@ export async function placeBulkPredictions(
             justification,
           });
         });
+        predictionRows.push(modelPredictionRows);
       }
     }
   }
@@ -223,14 +243,15 @@ export async function placeBulkPredictions(
     );
   }
 
+  const flatPredictionRows = predictionRows.flat();
   let insertedPredictions: InsertedPrediction[] = [];
-  if (predictionRows.length > 0) {
+  if (flatPredictionRows.length > 0) {
     const { data: inserted, error: insertError } = await supabase
       .from("predictions")
-      .insert(predictionRows.map((row) => ({ ...row, event_ticker: eventTicker })))
+      .insert(flatPredictionRows)
       .select();
     if (insertError) {
-      throw new Error(`Failed to insert predictions for ${eventTicker}: ${insertError.message}`);
+      throw new Error(`Failed to insert predictions for event ${eventId}: ${insertError.message}`);
     }
     insertedPredictions = (inserted ?? []) as InsertedPrediction[];
   }
@@ -238,9 +259,9 @@ export async function placeBulkPredictions(
   if (strategyRows.length > 0) {
     const { error: strategyError } = await supabase
       .from("model_event_strategies")
-      .upsert(strategyRows, { onConflict: "model_name,event_ticker" });
+      .upsert(strategyRows, { onConflict: "model_name,event_id" });
     if (strategyError) {
-      throw new Error(`Failed to upsert strategies for ${eventTicker}: ${strategyError.message}`);
+      throw new Error(`Failed to upsert strategies for event ${eventId}: ${strategyError.message}`);
     }
   }
 

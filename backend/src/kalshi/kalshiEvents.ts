@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 const KALSHI_API_BASE = "https://external-api.kalshi.com/trade-api/v2";
 
 export interface KalshiMarket {
@@ -461,4 +463,86 @@ export async function getEventBundle(
 ): Promise<CompactEventBundle> {
   const bundle = await fetchRawEventBundle(seriesTicker, eventTicker, opts);
   return toCompactBundle(bundle);
+}
+
+/** Resolves related event tickers (like moneylines, spreads, prop bets) for a given
+ * sports event ticker by fetching associated milestones for the series. */
+export async function getMilestoneRelatedTickers(
+  seriesTicker: string,
+  eventTicker: string
+): Promise<string[]> {
+  try {
+    const params = new URLSearchParams({
+      series_ticker: seriesTicker,
+      with_milestones: "true",
+      limit: "100",
+    });
+    const data = await kalshiGet<{
+      events: KalshiEvent[];
+      milestones?: Array<{
+        primary_event_tickers?: string[];
+        related_event_tickers?: string[];
+      }>;
+    }>(`/events?${params.toString()}`);
+
+    if (data.milestones && data.milestones.length > 0) {
+      // Find the milestone containing our eventTicker
+      const matchMilestone = data.milestones.find(
+        (m) =>
+          m.primary_event_tickers?.includes(eventTicker) ||
+          m.related_event_tickers?.includes(eventTicker)
+      );
+      if (matchMilestone && matchMilestone.related_event_tickers) {
+        // Filter out duplicates, and exclude announcer mentions-related tickers
+        return Array.from(new Set(matchMilestone.related_event_tickers))
+          .filter((t) => !t.toLowerCase().includes("mention"));
+      }
+    }
+  } catch (error) {
+    console.error("Failed to resolve related event tickers via milestones:", error);
+  }
+  return [eventTicker]; // fallback to just the input event
+}
+
+export function getDeterministicUuid(str: string): string {
+  const hash = crypto.createHash("sha256").update(str).digest("hex");
+  return [
+    hash.substring(0, 8),
+    hash.substring(8, 12),
+    hash.substring(12, 16),
+    hash.substring(16, 20),
+    hash.substring(20, 32),
+  ].join("-");
+}
+
+export async function getMilestoneId(seriesTicker: string, eventTicker: string): Promise<string> {
+  try {
+    const params = new URLSearchParams({
+      series_ticker: seriesTicker,
+      with_milestones: "true",
+      limit: "100",
+    });
+    const data = await kalshiGet<{
+      events: KalshiEvent[];
+      milestones?: Array<{
+        id: string;
+        primary_event_tickers?: string[];
+        related_event_tickers?: string[];
+      }>;
+    }>(`/events?${params.toString()}`);
+
+    if (data.milestones && data.milestones.length > 0) {
+      const matchMilestone = data.milestones.find(
+        (m) =>
+          m.primary_event_tickers?.includes(eventTicker) ||
+          m.related_event_tickers?.includes(eventTicker)
+      );
+      if (matchMilestone && matchMilestone.id) {
+        return matchMilestone.id;
+      }
+    }
+  } catch (error) {
+    console.error("Failed to find milestone ID via API:", error);
+  }
+  return getDeterministicUuid(eventTicker);
 }

@@ -1,20 +1,7 @@
 import { getSupabaseClient } from "../supabase/supabaseClient";
 
-// ---------------------------------------------------------------------------
-// Read-only queries against the event data kalshiIngest.ts already wrote to
-// Supabase (events/markets/market_price_history/event_forecast_*/
-// event_related_events) — what a frontend calls to display an event, as
-// opposed to kalshiEvents.ts (live Kalshi fetch) or kalshiIngest.ts (write).
-// getEventDetail() reshapes the flat table rows back into the same
-// {event, markets, priceHistory, forecastHistory, relatedEvents} shape
-// CompactEventBundle uses, so frontend code doesn't need two different
-// event-shape parsers depending on whether data came from Kalshi live or
-// from Supabase.
-// ---------------------------------------------------------------------------
-
 export interface EventListItem {
-  event_ticker: string;
-  series_ticker: string;
+  id: string; // consolidated parent event_id
   event_name: string;
   sub_title: string | null;
   competition: string | null;
@@ -24,6 +11,11 @@ export interface EventListItem {
   close_time: string | null;
   created_at: string;
   market_count: number;
+  tickers: Array<{
+    event_ticker: string;
+    series_ticker: string;
+    title: string;
+  }>;
 }
 
 export async function listEvents(): Promise<EventListItem[]> {
@@ -31,7 +23,7 @@ export async function listEvents(): Promise<EventListItem[]> {
   const { data, error } = await supabase
     .from("events")
     .select(
-      "event_ticker, series_ticker, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at, markets(count)"
+      "id, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at, event_tickers(event_ticker, series_ticker, title), markets(count)"
     )
     .order("created_at", { ascending: false });
 
@@ -39,10 +31,32 @@ export async function listEvents(): Promise<EventListItem[]> {
     throw new Error(`Failed to list events: ${error.message}`);
   }
 
-  type Row = Omit<EventListItem, "market_count"> & { markets: { count: number }[] };
-  return ((data ?? []) as unknown as Row[]).map(({ markets, ...row }) => ({
-    ...row,
-    market_count: markets[0]?.count ?? 0,
+  type Row = {
+    id: string;
+    event_name: string;
+    sub_title: string | null;
+    competition: string | null;
+    competition_scope: string | null;
+    status: string | null;
+    open_time: string | null;
+    close_time: string | null;
+    created_at: string;
+    event_tickers: Array<{ event_ticker: string; series_ticker: string; title: string }>;
+    markets: { count: number }[];
+  };
+
+  return ((data ?? []) as unknown as Row[]).map((row) => ({
+    id: row.id,
+    event_name: row.event_name,
+    sub_title: row.sub_title,
+    competition: row.competition,
+    competition_scope: row.competition_scope,
+    status: row.status,
+    open_time: row.open_time,
+    close_time: row.close_time,
+    created_at: row.created_at,
+    market_count: row.markets[0]?.count ?? 0,
+    tickers: row.event_tickers ?? [],
   }));
 }
 
@@ -84,8 +98,7 @@ interface ForecastSummaryRow {
 
 export interface EventDetail {
   event: {
-    event_ticker: string;
-    series_ticker: string;
+    id: string;
     event_name: string;
     sub_title: string | null;
     competition: string | null;
@@ -95,6 +108,7 @@ export interface EventDetail {
     close_time: string | null;
     created_at: string;
   };
+  tickers: Array<{ event_ticker: string; series_ticker: string; title: string }>;
   markets: MarketRow[];
   priceHistory: Array<{ market_ticker: string; points: Array<Omit<PriceHistoryRow, "market_ticker">> }>;
   forecastHistory: Array<{
@@ -107,33 +121,38 @@ export interface EventDetail {
       formatted_forecast: string | null;
     }>;
   }>;
-  relatedEvents: Array<{ related_event_ticker: string; related_title: string | null }>;
 }
 
-export async function getEventDetail(eventTicker: string): Promise<EventDetail | null> {
+export async function getEventDetail(eventId: string): Promise<EventDetail | null> {
   const supabase = getSupabaseClient();
 
   const { data: event, error: eventError } = await supabase
     .from("events")
-    .select(
-      "event_ticker, series_ticker, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at"
-    )
-    .eq("event_ticker", eventTicker)
+    .select("id, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at")
+    .eq("id", eventId)
     .maybeSingle();
   if (eventError) {
-    throw new Error(`Failed to load event ${eventTicker}: ${eventError.message}`);
+    throw new Error(`Failed to load event ${eventId}: ${eventError.message}`);
   }
   if (!event) return null;
 
+  // Load sibling tickers for this parent event
+  const { data: tickers, error: tickersError } = await supabase
+    .from("event_tickers")
+    .select("event_ticker, series_ticker, title")
+    .eq("event_id", eventId);
+  if (tickersError) {
+    throw new Error(`Failed to load tickers for event ${eventId}: ${tickersError.message}`);
+  }
+
+  // Load all markets for all sibling tickers under this parent event
   const { data: markets, error: marketsError } = await supabase
     .from("markets")
-    .select(
-      "ticker, event_ticker, label, status, result, yes_price, yes_bid, yes_ask, volume, volume_24h, open_interest, open_time, close_time, rules"
-    )
-    .eq("event_ticker", eventTicker)
+    .select("ticker, event_ticker, label, status, result, yes_price, yes_bid, yes_ask, volume, volume_24h, open_interest, open_time, close_time, rules")
+    .eq("event_id", eventId)
     .order("ticker", { ascending: true });
   if (marketsError) {
-    throw new Error(`Failed to load markets for ${eventTicker}: ${marketsError.message}`);
+    throw new Error(`Failed to load markets for event ${eventId}: ${marketsError.message}`);
   }
 
   const marketTickers = (markets ?? []).map((m) => m.ticker);
@@ -147,7 +166,7 @@ export async function getEventDetail(eventTicker: string): Promise<EventDetail |
       .order("market_ticker", { ascending: true })
       .order("period_end_ts", { ascending: true });
     if (priceError) {
-      throw new Error(`Failed to load price history for ${eventTicker}: ${priceError.message}`);
+      throw new Error(`Failed to load price history for event ${eventId}: ${priceError.message}`);
     }
     const byMarket = new Map<string, EventDetail["priceHistory"][number]["points"]>();
     for (const row of (priceRows ?? []) as PriceHistoryRow[]) {
@@ -164,14 +183,15 @@ export async function getEventDetail(eventTicker: string): Promise<EventDetail |
     priceHistory = [...byMarket.entries()].map(([market_ticker, points]) => ({ market_ticker, points }));
   }
 
+  // Load forecast history
   const { data: forecastRows, error: forecastError } = await supabase
     .from("event_forecast_summary")
     .select("event_ticker, end_period_ts, period_interval, percentile, numerical_forecast, raw_numerical_forecast, formatted_forecast")
-    .eq("event_ticker", eventTicker)
+    .eq("event_id", eventId)
     .order("end_period_ts", { ascending: true })
     .order("percentile", { ascending: true });
   if (forecastError) {
-    throw new Error(`Failed to load forecast history for ${eventTicker}: ${forecastError.message}`);
+    throw new Error(`Failed to load forecast history for event ${eventId}: ${forecastError.message}`);
   }
   const bySnapshot = new Map<string, EventDetail["forecastHistory"][number]>();
   for (const row of (forecastRows ?? []) as ForecastSummaryRow[]) {
@@ -191,19 +211,21 @@ export async function getEventDetail(eventTicker: string): Promise<EventDetail |
   }
   const forecastHistory = [...bySnapshot.values()];
 
-  const { data: relatedEvents, error: relatedError } = await supabase
-    .from("event_related_events")
-    .select("related_event_ticker, related_title")
-    .eq("event_ticker", eventTicker);
-  if (relatedError) {
-    throw new Error(`Failed to load related events for ${eventTicker}: ${relatedError.message}`);
-  }
-
   return {
-    event,
+    event: {
+      id: event.id,
+      event_name: event.event_name,
+      sub_title: event.sub_title,
+      competition: event.competition,
+      competition_scope: event.competition_scope,
+      status: event.status,
+      open_time: event.open_time,
+      close_time: event.close_time,
+      created_at: event.created_at,
+    },
+    tickers: tickers ?? [],
     markets: (markets ?? []) as MarketRow[],
     priceHistory,
     forecastHistory,
-    relatedEvents: relatedEvents ?? [],
   };
 }
