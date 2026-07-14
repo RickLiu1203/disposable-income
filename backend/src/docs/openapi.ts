@@ -933,6 +933,379 @@ export const openapiSpec = {
         },
       },
     },
+    "/predictions/adjust-balance": {
+      post: {
+        summary: "Manually adjust a model's ending balance for a settled event, propagating the change",
+        description:
+          "Manually sets the ending balance for a model on a specific settled event. This recalculates the event's payouts and propagates the balance shift forward through the starting/ending balances of all subsequent settled events that any model participated in, keeping the database consistent and updating models.current_balance.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["event_id", "model_name", "ending_balance"],
+                properties: {
+                  event_id: { type: "string", format: "uuid", description: "The UUID of the parent event." },
+                  model_name: { type: "string", description: "The name of the model to adjust." },
+                  ending_balance: { type: "number", minimum: 0, description: "The new manual ending balance." },
+                },
+              },
+              example: {
+                event_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                model_name: "sonnet-5",
+                ending_balance: 12.5,
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Balance adjusted and propagated successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        success: { type: "boolean", example: true },
+                        propagatedEvents: { type: "array", items: { type: "string" } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Invalid input values",
+          },
+          "502": {
+            description: "Propagation failed or database request failed",
+          },
+        },
+      },
+    },
+    "/agent/bankroll": {
+      get: {
+        summary: "Agent pipeline step 1: fetch a model's current bankroll and its change since its last match",
+        description:
+          "Returns three numbers: current_balance (models.current_balance), previous_balance (this model's starting_balance on its most recently played match, from model_event_results), and change (computed server-side). previous_balance/change are null if the model has no settled match history yet.",
+        parameters: [
+          {
+            name: "model_name",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "The model to fetch bankroll info for.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Bankroll info retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        model_name: { type: "string" },
+                        current_balance: { type: "number" },
+                        previous_balance: { type: "number", nullable: true },
+                        change: { type: "number", nullable: true },
+                      },
+                    },
+                  },
+                },
+                example: { ok: true, data: { model_name: "sonnet-5", current_balance: 12.4, previous_balance: 10, change: 2.4 } },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'model_name' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Unknown model or Supabase request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/leaderboard": {
+      get: {
+        summary: "Agent pipeline step 2: fetch the tournament's top-3 lifetime leaderboard, plus the requesting model's own rank",
+        description:
+          "Returns exactly 3 leaderboard entries (ranked by lifetime average performance) plus 1 own-rank entry, regardless of tournament length. Each entry includes its single best-ever match (from the agent_best_performances view, performance_rank=1) with a one-sentence strategy_headline (may be null for rows written before the headline column existed).",
+        parameters: [
+          {
+            name: "model_name",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "The requesting model, to populate 'your_rank' even when it isn't in the top 3.",
+          },
+          {
+            name: "limit",
+            in: "query",
+            required: false,
+            schema: { type: "integer", default: 3 },
+            description: "Number of top leaderboard entries to return; default 3.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Leaderboard retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        top: { type: "array", items: { type: "object" } },
+                        your_rank: { type: "object", nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/past-performance": {
+      get: {
+        summary: "Agent pipeline step 3: fetch recent (short-term) match-form signals, distinct from step 2's lifetime average",
+        description:
+          "Returns three bounded signals: recent_pool_top/recent_pool_bottom (pools each model's last-up-to-3 settled matches, capped to the best/worst pool_limit by percent_change), and own_recent (the requesting model's own last-up-to-own_limit settled matches, always included). Bounded to at most pool_limit*2 + own_limit entries (13 by default) regardless of how many models/matches accumulate.",
+        parameters: [
+          { name: "model_name", in: "query", required: true, schema: { type: "string" } },
+          { name: "event_id", in: "query", required: false, schema: { type: "string", format: "uuid" }, description: "Current event id, excluded from the pooled/own history if already present." },
+          { name: "pool_limit", in: "query", required: false, schema: { type: "integer", default: 5 } },
+          { name: "own_limit", in: "query", required: false, schema: { type: "integer", default: 3 } },
+        ],
+        responses: {
+          "200": {
+            description: "Past performance retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        recent_pool_top: { type: "array", items: { type: "object" } },
+                        recent_pool_bottom: { type: "array", items: { type: "object" } },
+                        own_recent: { type: "array", items: { type: "object" } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'model_name' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/markets": {
+      get: {
+        summary: "Agent pipeline step 4: fetch this event's live markets, bounded to core markets + top props by volume",
+        description:
+          "Live-fetches every sibling event ticker (from event_tickers) in parallel from Kalshi (never the DB's ingestion-time snapshot). Splits markets into core_markets (always included in full, per CORE_SERIES_SUFFIXES_BY_PREFIX in agentMarketConfig.ts) and top_prop_markets (pooled across all non-core siblings, highest volume first). Never limits total visible markets below a floor of 50: props_limit = max(30, 50 - core_markets.length). Anything past that floor is summarized in 'omitted' (per-sibling omitted_count + total_volume), never silently dropped. Pass expand_ticker for the full unbounded market list of one specific sibling.",
+        parameters: [
+          { name: "event_id", in: "query", required: true, schema: { type: "string", format: "uuid" } },
+          { name: "expand_ticker", in: "query", required: false, schema: { type: "string" }, description: "One sibling event_ticker to return the full (unbounded) market list for." },
+        ],
+        responses: {
+          "200": {
+            description: "Market selection retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        siblings: { type: "array", items: { type: "object" } },
+                        core_markets: { type: "array", items: { type: "object" } },
+                        top_prop_markets: { type: "array", items: { type: "object" } },
+                        omitted: { type: "array", items: { type: "object" } },
+                        expanded: { type: "object", nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Event not ingested (no sibling tickers), or a Kalshi request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/history": {
+      get: {
+        summary: "Agent pipeline step 5: fetch live price-trend deltas for the same core+top-props markets step 4 shows",
+        description:
+          "Reuses the exact same core+top-props market selection as GET /agent/markets so the deltas line up with the markets just shown. Per market: price_now, delta_1h, delta_6h, delta_24h, direction_24h, all derived from live Kalshi candlesticks over the given window (no raw candlestick point arrays in the default response -- use GET /agent/market-detail for that).",
+        parameters: [
+          { name: "event_id", in: "query", required: true, schema: { type: "string", format: "uuid" } },
+          { name: "window_hours", in: "query", required: false, schema: { type: "integer", default: 24 }, description: "How far back to fetch candlesticks for; deltas beyond the available window are null." },
+        ],
+        responses: {
+          "200": {
+            description: "Price history deltas retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: { window_hours: { type: "number" }, markets: { type: "array", items: { type: "object" } } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Event not ingested, or a Kalshi request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/forecast": {
+      get: {
+        summary: "Agent pipeline step 6: fetch a deterministic forecast band-width summary, live from Kalshi",
+        description:
+          "Catches a bias risk a naive 'median moved from A to B' hides: the median can stay flat while the 90th-percentile band swings widely across consecutive snapshots. Computed in code (not SQL, not LLM-narrated) from live getEventForecastPercentileHistory. Forecast history only resolves for numeric-scalar siblings (e.g. totals), not binary threshold markets, so this tries each core sibling in turn and returns the first with data; siblings that had no forecast data are listed in unavailable_siblings with a reason, not treated as a request failure.",
+        parameters: [
+          { name: "event_id", in: "query", required: true, schema: { type: "string", format: "uuid" } },
+          { name: "window_hours", in: "query", required: false, schema: { type: "integer", default: 24 } },
+        ],
+        responses: {
+          "200": {
+            description: "Forecast summary retrieved successfully (data may be an empty object plus unavailable_siblings if no sibling had resolvable forecast history)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        event_ticker: { type: "string" },
+                        latest: { type: "object", properties: { median: { type: "number", nullable: true }, p10: { type: "number", nullable: true }, p90: { type: "number", nullable: true }, band_width: { type: "number", nullable: true } } },
+                        window_delta_median: { type: "number", nullable: true },
+                        band_width_min_in_window: { type: "number", nullable: true },
+                        band_width_max_in_window: { type: "number", nullable: true },
+                        snapshot_count_in_window: { type: "number" },
+                        unavailable_siblings: { type: "array", items: { type: "object" } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Event not ingested, or a Kalshi request failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/market-detail": {
+      get: {
+        summary: "On-demand pipeline drill-down: full candlestick history, full forecast history, and full rules text for one market",
+        description:
+          "For when the agent is about to commit real capital to a specific market and wants more than GET /agent/markets / GET /agent/history's bounded summaries. Live-fetches the market's parent event and returns its full (unbounded) candlestick series and forecast history alongside the market's full rules text.",
+        parameters: [{ name: "ticker", in: "query", required: true, schema: { type: "string" }, description: "The specific Kalshi market ticker to drill into." }],
+        responses: {
+          "200": {
+            description: "Market detail retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        ticker: { type: "string" },
+                        label: { type: "string" },
+                        status: { type: "string" },
+                        result: { type: "string" },
+                        yes_price: { type: "number", nullable: true },
+                        yes_bid: { type: "number", nullable: true },
+                        yes_ask: { type: "number", nullable: true },
+                        rules_primary: { type: "string" },
+                        rules_secondary: { type: "string" },
+                        candlesticks: { type: "array", items: { type: "object" } },
+                        forecast_history: { type: "array", items: { type: "object" }, nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'ticker' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Kalshi request failed (unknown ticker, etc.)",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
     "/polymarket/search-events": {
       get: {
         summary:

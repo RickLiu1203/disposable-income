@@ -357,3 +357,159 @@ export async function settleEvent(eventTicker: string): Promise<SettleEventResul
     event_payouts_computed: eventPayoutsComputed,
   };
 }
+
+export async function adjustModelEndingBalance(
+  eventId: string,
+  modelName: string,
+  newEndingBalance: number
+): Promise<{ success: boolean; propagatedEvents: string[] }> {
+  const supabase = getSupabaseClient();
+
+  if (typeof newEndingBalance !== "number" || isNaN(newEndingBalance) || newEndingBalance < 0) {
+    throw new Error("Ending balance must be a non-negative number.");
+  }
+
+  // 1. Get all settled events (events that have payouts computed) ordered chronologically.
+  const { data: payouts, error: payoutsError } = await supabase
+    .from("event_payouts")
+    .select("event_id");
+  if (payoutsError) {
+    throw new Error(`Failed to fetch settled event IDs: ${payoutsError.message}`);
+  }
+  const settledEventIds = Array.from(new Set((payouts ?? []).map((p) => p.event_id)));
+
+  if (settledEventIds.length === 0) {
+    throw new Error("No settled events found to propagate.");
+  }
+
+  // Fetch events to get their created_at time
+  const { data: events, error: eventsError } = await supabase
+    .from("events")
+    .select("id, created_at")
+    .in("id", settledEventIds)
+    .order("created_at", { ascending: true });
+
+  if (eventsError) {
+    throw new Error(`Failed to fetch settled events: ${eventsError.message}`);
+  }
+
+  const targetIndex = events.findIndex((e) => e.id === eventId);
+  if (targetIndex === -1) {
+    throw new Error(`Event ${eventId} is not settled or does not exist.`);
+  }
+
+  const propagatedEvents: string[] = [];
+
+  for (let i = targetIndex; i < events.length; i++) {
+    const currentEventId = events[i].id;
+    propagatedEvents.push(currentEventId);
+
+    if (i === targetIndex) {
+      // For the first event in propagation, we set the manual ending balance.
+      const { error: updateError } = await supabase
+        .from("model_event_results")
+        .update({ ending_balance: newEndingBalance })
+        .eq("model_name", modelName)
+        .eq("event_id", currentEventId);
+
+      if (updateError) {
+        throw new Error(`Failed to update manual ending balance: ${updateError.message}`);
+      }
+    } else {
+      // For subsequent events, we need to update the starting balance of ALL models
+      // based on their total_payout from their previous settled event.
+      const { data: participants, error: partError } = await supabase
+        .from("model_event_results")
+        .select("model_name")
+        .eq("event_id", currentEventId);
+      
+      if (partError) {
+        throw new Error(`Failed to fetch participants for event ${currentEventId}: ${partError.message}`);
+      }
+
+      for (const p of participants ?? []) {
+        const mName = p.model_name;
+
+        // Find the most recent settled event prior to i where mName participated
+        let prevEventId: string | null = null;
+        for (let j = i - 1; j >= 0; j--) {
+          const candidateEventId = events[j].id;
+          const { data: hasPart, error: checkError } = await supabase
+            .from("model_event_results")
+            .select("model_name")
+            .eq("event_id", candidateEventId)
+            .eq("model_name", mName)
+            .maybeSingle();
+          
+          if (checkError) {
+            throw new Error(`Failed to check participation: ${checkError.message}`);
+          }
+          if (hasPart) {
+            prevEventId = candidateEventId;
+            break;
+          }
+        }
+
+        if (prevEventId) {
+          // Get the total_payout from prevEventId
+          const { data: prevPayout, error: payoutError } = await supabase
+            .from("event_payouts")
+            .select("total_payout")
+            .eq("event_id", prevEventId)
+            .eq("model_name", mName)
+            .single();
+
+          if (payoutError) {
+            throw new Error(`Failed to fetch payout for ${mName} in ${prevEventId}: ${payoutError.message}`);
+          }
+
+          const newStartingBalance = Number(prevPayout.total_payout);
+
+          // Update starting balance for currentEventId
+          const { error: startUpdateError } = await supabase
+            .from("model_event_results")
+            .update({ starting_balance: newStartingBalance })
+            .eq("model_name", mName)
+            .eq("event_id", currentEventId);
+
+          if (startUpdateError) {
+            throw new Error(`Failed to update starting balance for ${mName} in ${currentEventId}: ${startUpdateError.message}`);
+          }
+
+          // Recalculate ending balance for mName in currentEventId
+          const { data: preds, error: predsError } = await supabase
+            .from("predictions")
+            .select("stake, payout")
+            .eq("event_id", currentEventId)
+            .eq("model_name", mName);
+
+          if (predsError) {
+            throw new Error(`Failed to fetch predictions for recalculation: ${predsError.message}`);
+          }
+
+          const endingBalance = newStartingBalance + (preds ?? []).reduce(
+            (sum, r) => sum + (Number(r.payout ?? 0) - Number(r.stake)),
+            0
+          );
+
+          const { error: endUpdateError } = await supabase
+            .from("model_event_results")
+            .update({ ending_balance: endingBalance })
+            .eq("model_name", mName)
+            .eq("event_id", currentEventId);
+
+          if (endUpdateError) {
+            throw new Error(`Failed to update ending balance for ${mName} in ${currentEventId}: ${endUpdateError.message}`);
+          }
+        }
+      }
+    }
+
+    // Recompute payouts for currentEventId.
+    // This updates event_payouts for currentEventId and updates models.current_balance.
+    await computeEventPayouts(supabase, currentEventId);
+  }
+
+  return { success: true, propagatedEvents };
+}
+

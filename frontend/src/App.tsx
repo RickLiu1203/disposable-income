@@ -15,6 +15,9 @@ import {
   ChevronUp,
   Trash2,
   Trophy,
+  Pencil,
+  Check,
+  Upload,
 } from "lucide-react";
 
 // Types matching the backend schema
@@ -206,6 +209,16 @@ export default function App() {
   // Detail view tab & strategy expansions
   const [detailTab, setDetailTab] = useState<"markets" | "leaderboard">("markets");
   const [expandedStrategies, setExpandedStrategies] = useState<Record<string, boolean>>({});
+  const [detailRefreshTrigger, setDetailRefreshTrigger] = useState(0);
+  const [editingModelName, setEditingModelName] = useState<string | null>(null);
+  const [editingEndingBalanceValue, setEditingEndingBalanceValue] = useState("");
+  const [adjustingBalance, setAdjustingBalance] = useState(false);
+  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
+  const [adjustmentSuccessMessage, setAdjustmentSuccessMessage] = useState<string | null>(null);
+
+  // Drag and drop state
+  const [isDragging, setIsDragging] = useState(false);
+  const [draggedFileName, setDraggedFileName] = useState<string | null>(null);
 
   // Fetch events list
   const fetchEvents = async (selectTickerAfterFetch?: string) => {
@@ -285,6 +298,7 @@ export default function App() {
       setDetailError(null);
       setSettleResult(null);
       setPredictionPasteInput("");
+      setDraggedFileName(null);
       setPlaceError(null);
       setPlaceValidationErrorDetails(null);
       setPlaceSuccess(null);
@@ -314,7 +328,7 @@ export default function App() {
     };
 
     fetchDetail();
-  }, [selectedTicker]);
+  }, [selectedTicker, detailRefreshTrigger]);
 
   // Handle event ingestion
   const handleIngest = async (e: React.FormEvent) => {
@@ -408,6 +422,86 @@ export default function App() {
     }
   };
 
+  // Handle balance adjustment
+  const handleAdjustBalance = async (modelName: string, eventId: string) => {
+    const val = parseFloat(editingEndingBalanceValue);
+    if (isNaN(val) || val < 0) {
+      setAdjustmentError("Balance must be a non-negative number.");
+      return;
+    }
+
+    setAdjustingBalance(true);
+    setAdjustmentError(null);
+    setAdjustmentSuccessMessage(null);
+
+    try {
+      const res = await fetch("/api/predictions/adjust-balance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event_id: eventId,
+          model_name: modelName,
+          ending_balance: val,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Failed to adjust balance");
+      }
+
+      setAdjustmentSuccessMessage(`Successfully adjusted Ending Balance to $${val.toFixed(2)} and propagated changes across ${data.data.propagatedEvents?.length ?? 0} settled event(s).`);
+      setEditingModelName(null);
+      setDetailRefreshTrigger(prev => prev + 1);
+    } catch (err) {
+      setAdjustmentError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setAdjustingBalance(false);
+    }
+  };
+
+  // Drag and drop handlers for JSON files
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    setPlaceError(null);
+    setPlaceValidationErrorDetails(null);
+
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      if (file.type !== "application/json" && !file.name.endsWith(".json")) {
+        setPlaceError("Invalid file type. Please upload a JSON file.");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const text = event.target?.result as string;
+          // Validate JSON syntax locally before pasting it
+          JSON.parse(text);
+          setPredictionPasteInput(text);
+          setDraggedFileName(file.name);
+        } catch {
+          setPlaceError("Failed to parse JSON. Ensure the file contains valid JSON formatting.");
+          setPredictionPasteInput("");
+          setDraggedFileName(null);
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
   // Handle event deletion
   const handleDelete = async () => {
     if (!selectedTicker) return;
@@ -473,6 +567,7 @@ export default function App() {
       if (res.ok && data.ok) {
         setPlaceSuccess(data.data);
         setPredictionPasteInput("");
+        setDraggedFileName(null);
         // Refresh details to reflect changes
         if (selectedTicker) {
           const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selectedTicker);
@@ -922,16 +1017,53 @@ export default function App() {
               </div>
 
               {/* Upload Agent Predictions Card */}
-              <div className="p-6 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-900 space-y-4">
-                <div className="flex items-center space-x-2 pb-2 border-b border-slate-900">
-                  <Plus className="h-5 w-5 text-purple-400" />
-                  <h3 className="text-base font-bold text-slate-200">
-                    Upload Agent Predictions
-                  </h3>
+              {/* Upload Agent Predictions Card */}
+              <div 
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`p-6 rounded-2xl border transition-all duration-200 relative ${
+                  isDragging 
+                    ? "bg-purple-950/20 border-purple-500 border-dashed scale-[1.01] shadow-lg shadow-purple-500/5" 
+                    : "bg-gradient-to-b from-slate-900 to-slate-950 border-slate-900"
+                } space-y-4`}
+              >
+                {isDragging && (
+                  <div className="absolute inset-0 bg-slate-950/90 rounded-2xl flex flex-col items-center justify-center space-y-2 z-10 border border-purple-500 border-dashed backdrop-blur-sm pointer-events-none animate-pulse">
+                    <Upload className="h-8 w-8 text-purple-400" />
+                    <span className="text-sm font-semibold text-slate-200">Drop JSON file here</span>
+                    <span className="text-xs text-slate-500 font-sans">to load predictions instantly</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pb-2 border-b border-slate-900">
+                  <div className="flex items-center space-x-2">
+                    <Plus className="h-5 w-5 text-purple-400" />
+                    <h3 className="text-base font-bold text-slate-200">
+                      Upload Agent Predictions
+                    </h3>
+                  </div>
+                  {draggedFileName && (
+                    <div className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-[10px] font-mono font-medium">
+                      <FileJson className="h-3 w-3 shrink-0" />
+                      <span className="truncate max-w-[150px]">{draggedFileName}</span>
+                      <button 
+                        type="button"
+                        onClick={() => {
+                          setDraggedFileName(null);
+                          setPredictionPasteInput("");
+                        }}
+                        className="hover:text-purple-300 transition shrink-0 cursor-pointer"
+                        title="Remove file"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
                 </div>
                 
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Paste the JSON outputted by the betting agent model below. It must include 
+                  Paste the JSON outputted by the betting agent model below, or <strong>drag and drop a JSON file</strong> anywhere onto this card. It must include 
                   <code className="text-purple-400 font-mono mx-1">event_id</code>, 
                   <code className="text-purple-400 font-mono mx-1">model_name</code>, 
                   and optionally <code className="text-purple-400 font-mono mx-1">strategy_notes</code> and 
@@ -942,7 +1074,10 @@ export default function App() {
                   <div>
                     <textarea
                       value={predictionPasteInput}
-                      onChange={(e) => setPredictionPasteInput(e.target.value)}
+                      onChange={(e) => {
+                        setPredictionPasteInput(e.target.value);
+                        if (draggedFileName) setDraggedFileName(null);
+                      }}
                       placeholder={`{\n  "event_id": "${detail.event.id || 'e185fe0f-...'}",\n  "model_name": "gemini-3.5-flash",\n  "strategy_notes": "Favoring...",\n  "predictions": [\n    {\n      "market_ticker": "${detail.markets[0]?.ticker || 'KXWCADVANCE-...'}",\n      "side": "yes",\n      "stake": 5.0,\n      "justification": "..."\n    }\n  ]\n}`}
                       rows={8}
                       disabled={placingPredictions}
@@ -1391,6 +1526,26 @@ export default function App() {
                     </h3>
                   </div>
 
+                  {adjustmentError && (
+                    <div className="p-3 text-xs bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-lg flex items-center space-x-2">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      <span>{adjustmentError}</span>
+                      <button onClick={() => setAdjustmentError(null)} className="ml-auto text-rose-400 hover:text-rose-300 cursor-pointer">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
+
+                  {adjustmentSuccessMessage && (
+                    <div className="p-3 text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg flex items-center space-x-2">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>{adjustmentSuccessMessage}</span>
+                      <button onClick={() => setAdjustmentSuccessMessage(null)} className="ml-auto text-emerald-400 hover:text-emerald-300 cursor-pointer">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
+
                   {!detail.leaderboard || detail.leaderboard.length === 0 ? (
                     <div className="p-8 text-center text-slate-500 text-xs italic">
                       No model event results recorded yet. Settle the predictions to compute performance and payouts.
@@ -1427,7 +1582,68 @@ export default function App() {
                                     </td>
                                     <td className="p-3 text-right">${row.starting_balance.toFixed(2)}</td>
                                     <td className="p-3 text-right">
-                                      {row.ending_balance !== null ? `$${row.ending_balance.toFixed(2)}` : "--"}
+                                      {editingModelName === row.model_name ? (
+                                        <div className="flex items-center justify-end space-x-1.5">
+                                          <span className="text-slate-400">$</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0"
+                                            className="w-20 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-right text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-50"
+                                            value={editingEndingBalanceValue}
+                                            onChange={(e) => setEditingEndingBalanceValue(e.target.value)}
+                                            disabled={adjustingBalance}
+                                            autoFocus
+                                            onKeyDown={(e) => {
+                                              if (e.key === "Enter") {
+                                                handleAdjustBalance(row.model_name, detail.event.id);
+                                              } else if (e.key === "Escape") {
+                                                setEditingModelName(null);
+                                              }
+                                            }}
+                                          />
+                                          <button
+                                            onClick={() => handleAdjustBalance(row.model_name, detail.event.id)}
+                                            disabled={adjustingBalance}
+                                            className="p-1 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:bg-slate-800 disabled:text-slate-500 transition cursor-pointer flex items-center justify-center shrink-0"
+                                            title="Save balance"
+                                          >
+                                            {adjustingBalance ? (
+                                              <Loader2 className="h-3 w-3 animate-spin" />
+                                            ) : (
+                                              <Check className="h-3 w-3" />
+                                            )}
+                                          </button>
+                                          <button
+                                            onClick={() => setEditingModelName(null)}
+                                            disabled={adjustingBalance}
+                                            className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-300 transition cursor-pointer flex items-center justify-center shrink-0"
+                                            title="Cancel"
+                                          >
+                                            <X className="h-3 w-3" />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="flex items-center justify-end space-x-1 group">
+                                          <span>
+                                            {row.ending_balance !== null ? `$${row.ending_balance.toFixed(2)}` : "--"}
+                                          </span>
+                                          {row.ending_balance !== null && (
+                                            <button
+                                              onClick={() => {
+                                                setEditingModelName(row.model_name);
+                                                setEditingEndingBalanceValue(row.ending_balance!.toString());
+                                                setAdjustmentError(null);
+                                                setAdjustmentSuccessMessage(null);
+                                              }}
+                                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-purple-400 transition rounded hover:bg-slate-900 cursor-pointer flex items-center justify-center"
+                                              title="Edit ending balance"
+                                            >
+                                              <Pencil className="h-3 w-3" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
                                     </td>
                                     <td className={`p-3 text-right font-bold ${changeVal !== null ? (changeVal > 0 ? "text-emerald-400" : changeVal < 0 ? "text-rose-400" : "text-slate-400") : "text-slate-400"}`}>
                                       {changeVal !== null ? `${changeVal > 0 ? "+" : ""}${changeVal.toFixed(2)}%` : "--"}

@@ -390,7 +390,7 @@ export interface CompactEventBundle {
   partialErrors?: Record<string, string>;
 }
 
-function parseNum(value: string | undefined | null): number | null {
+export function parseNum(value: string | undefined | null): number | null {
   if (value == null) return null;
   const n = Number(value);
   return Number.isNaN(n) ? null : n;

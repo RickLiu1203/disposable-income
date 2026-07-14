@@ -6,7 +6,7 @@ import { getEventBundle, resolveKalshiMarketUrl, getMilestoneRelatedTickers } fr
 import { EventAlreadyIngestedError, ingestKalshiEvent } from "./kalshi/kalshiIngest";
 import { getEventDetail, listEvents, getLifetimeLeaderboard } from "./events/eventsRead";
 import { deleteEvent } from "./events/eventsDelete";
-import { settleEvent } from "./kalshi/kalshiSettle";
+import { settleEvent, adjustModelEndingBalance } from "./kalshi/kalshiSettle";
 import { getServerTime } from "./polymarket/polymarket";
 import { pingSupabase, getSupabaseClient } from "./supabase/supabaseClient";
 import {
@@ -17,6 +17,16 @@ import {
 } from "./polymarket/polymarketEvents";
 import { openapiSpec } from "./docs/openapi";
 import { placeModelPredictions, PredictionValidationError } from "./predictions/predictionsPlace";
+import { getBankroll, getLeaderboard, getPastPerformance } from "./agent/agentLedger";
+import {
+  getEventSiblings,
+  fetchSiblingBundles,
+  buildMarketSelection,
+  findExpandedSibling,
+  computeMarketHistory,
+  getForecastSummary,
+  getMarketDetail,
+} from "./agent/agentKalshi";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -426,6 +436,168 @@ app.post("/predictions/place", async (req, res) => {
       ok: false,
       error: error instanceof Error ? error.message : "Unknown error",
     });
+  }
+});
+
+app.post("/predictions/adjust-balance", async (req, res) => {
+  const body = req.body;
+
+  if (
+    typeof body?.event_id !== "string" ||
+    typeof body?.model_name !== "string" ||
+    typeof body?.ending_balance !== "number"
+  ) {
+    res.status(400).json({
+      ok: false,
+      error: "Body must include 'event_id' (string), 'model_name' (string), and 'ending_balance' (number)",
+    });
+    return;
+  }
+
+  try {
+    const result = await adjustModelEndingBalance(
+      body.event_id,
+      body.model_name,
+      body.ending_balance
+    );
+    res.json({ ok: true, data: result });
+  } catch (error) {
+    res.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// Agent decision pipeline (steps 1-6 + on-demand market-detail). See
+// CLAUDE.md "Agent decision pipeline" and
+// backend/prediction-market-agent-system-prompt.md for the full 9-step flow;
+// step 7 (link search) and step 8 (web search) are unchanged existing tools
+// with no dedicated endpoint, and step 9 is the extended POST
+// /predictions/place above.
+// ---------------------------------------------------------------------------
+
+app.get("/agent/bankroll", async (req, res) => {
+  const modelName = req.query.model_name;
+  if (typeof modelName !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'model_name' is required" });
+    return;
+  }
+  try {
+    const data = await getBankroll(modelName);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/leaderboard", async (req, res) => {
+  const modelName = typeof req.query.model_name === "string" ? req.query.model_name : undefined;
+  const limit = req.query.limit ? Number(req.query.limit) : 3;
+  try {
+    const data = await getLeaderboard(modelName, limit);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/past-performance", async (req, res) => {
+  const modelName = req.query.model_name;
+  const eventId = typeof req.query.event_id === "string" ? req.query.event_id : undefined;
+  const poolLimit = req.query.pool_limit ? Number(req.query.pool_limit) : 5;
+  const ownLimit = req.query.own_limit ? Number(req.query.own_limit) : 3;
+  if (typeof modelName !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'model_name' is required" });
+    return;
+  }
+  try {
+    const data = await getPastPerformance(modelName, eventId, poolLimit, ownLimit);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/markets", async (req, res) => {
+  const eventId = req.query.event_id;
+  const expandTicker = req.query.expand_ticker;
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  try {
+    const siblings = await getEventSiblings(eventId);
+    const siblingBundles = await fetchSiblingBundles(siblings);
+    const selection = buildMarketSelection(siblingBundles);
+    const expanded = typeof expandTicker === "string" ? findExpandedSibling(siblingBundles, expandTicker) : null;
+    res.json({
+      ok: true,
+      data: {
+        siblings: selection.siblings,
+        core_markets: selection.core_markets,
+        top_prop_markets: selection.top_prop_markets,
+        omitted: selection.omitted,
+        expanded,
+      },
+    });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/history", async (req, res) => {
+  const eventId = req.query.event_id;
+  const windowHours = req.query.window_hours ? Number(req.query.window_hours) : 24;
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  try {
+    const siblings = await getEventSiblings(eventId);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const siblingBundles = await fetchSiblingBundles(siblings, {
+      startTs: nowSec - windowHours * 3600,
+      endTs: nowSec,
+      periodInterval: 60,
+    });
+    const selection = buildMarketSelection(siblingBundles);
+    const markets = computeMarketHistory(siblingBundles, selection);
+    res.json({ ok: true, data: { window_hours: windowHours, markets } });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/forecast", async (req, res) => {
+  const eventId = req.query.event_id;
+  const windowHours = req.query.window_hours ? Number(req.query.window_hours) : 24;
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  try {
+    const siblings = await getEventSiblings(eventId);
+    const { result, unavailable_siblings } = await getForecastSummary(siblings, windowHours);
+    res.json({ ok: true, data: { ...(result ?? {}), unavailable_siblings } });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/market-detail", async (req, res) => {
+  const ticker = req.query.ticker;
+  if (typeof ticker !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'ticker' is required" });
+    return;
+  }
+  try {
+    const data = await getMarketDetail(ticker);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
   }
 });
 
