@@ -1,0 +1,150 @@
+@import "tailwindcss";
+
+/*
+ * Albert Sans — variable font, weights 100–900, self-hosted (latin
+ * subset only). Chosen over SF Pro: SF Pro's license restricts the
+ * font files to software running on Apple platforms, so it can't be
+ * shipped as a webfont. Albert Sans is open source (SIL OFL) and has
+ * the same clean, geometric, neutral character Notion/Airtable-style
+ * tools want.
+ */
+@font-face {
+  font-family: "Albert Sans";
+  src: url("./assets/fonts/AlbertSans-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Albert Sans";
+  src: url("./assets/fonts/AlbertSans-Italic-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@theme {
+  /* ---- Typography ---- */
+  --font-sans: "Albert Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Consolas, monospace;
+
+  /*
+   * Notion/Airtable run their UI text smaller and tighter than a
+   * marketing-site scale — base is 14px, not 16px, since these are
+   * dense, information-first tools, not prose.
+   */
+  --text-xs: 0.75rem; /* 12px */
+  --text-xs--line-height: 1rem; /* 16px */
+
+  --text-sm: 0.8125rem; /* 13px */
+  --text-sm--line-height: 1.125rem; /* 18px */
+
+  --text-base: 0.875rem; /* 14px */
+  --text-base--line-height: 1.25rem; /* 20px */
+
+  --text-md: 0.9375rem; /* 15px */
+  --text-md--line-height: 1.375rem; /* 22px */
+
+  --text-lg: 1.125rem; /* 18px */
+  --text-lg--line-height: 1.625rem; /* 26px */
+
+  --text-xl: 1.375rem; /* 22px */
+  --text-xl--line-height: 1.75rem; /* 28px */
+
+  --text-2xl: 1.75rem; /* 28px */
+  --text-2xl--line-height: 2.125rem; /* 34px */
+
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0em;
+
+  /* ---- Spacing ---- */
+  /* Base unit for the numeric scale (p-1, gap-2, m-4, ...) */
+  --spacing: 0.25rem; /* 4px */
+
+  /* ---- Color ---- */
+  /*
+   * Primary/secondary/accent chosen from the "Ledger" direction:
+   * zinc + slate keep most of the UI near-monochrome, so the single
+   * accent (orange) actually reads as the one call-to-action color.
+   * Neutral text/borders use Tailwind's built-in `neutral` scale
+   * directly and are intentionally not tied to these three.
+   */
+  --color-primary-50: #fafafa;
+  --color-primary-100: #f4f4f5;
+  --color-primary-200: #e4e4e7;
+  --color-primary-300: #d4d4d8;
+  --color-primary-400: #a1a1aa;
+  --color-primary-500: #71717a;
+  --color-primary-600: #52525b;
+  --color-primary-700: #3f3f46;
+  --color-primary-800: #27272a;
+  --color-primary-900: #18181b;
+
+  --color-secondary-50: #f8fafc;
+  --color-secondary-100: #f1f5f9;
+  --color-secondary-200: #e2e8f0;
+  --color-secondary-300: #cbd5e1;
+  --color-secondary-400: #94a3b8;
+  --color-secondary-500: #64748b;
+  --color-secondary-600: #475569;
+  --color-secondary-700: #334155;
+  --color-secondary-800: #1e293b;
+  --color-secondary-900: #0f172a;
+
+  --color-accent-50: #fff7ed;
+  --color-accent-100: #ffedd5;
+  --color-accent-200: #fed7aa;
+  --color-accent-300: #fdba74;
+  --color-accent-400: #fb923c;
+  --color-accent-500: #f97316;
+  --color-accent-600: #ea580c;
+  --color-accent-700: #c2410c;
+  --color-accent-800: #9a3412;
+  --color-accent-900: #7c2d12;
+
+  /*
+   * Semantic tokens — fixed independently of primary/secondary/accent,
+   * so a win/loss or open/settled signal always reads the same way
+   * no matter what the brand palette is doing.
+   */
+  --color-success-50: #ecfdf5;
+  --color-success-600: #059669;
+  --color-success-700: #047857;
+
+  --color-error-50: #fef2f2;
+  --color-error-600: #dc2626;
+  --color-error-700: #b91c1c;
+}
+
+/*
+ * Named spacing reference scale — plain CSS variables, deliberately
+ * declared outside @theme so Tailwind doesn't turn them into utility
+ * classes. `--spacing-2xl` inside @theme previously shadowed
+ * Tailwind's own built-in `max-w-2xl` (both read from the same
+ * `--spacing-*` namespace), collapsing every `max-w-2xl` container to
+ * 32px. Component spacing should use Tailwind's numeric scale
+ * (p-3, gap-4, ...), which shares the same 4px base above without the
+ * collision; use these only where you need the raw value directly,
+ * e.g. `style={{ width: "var(--space-lg)" }}`.
+ */
+:root {
+  --space-3xs: 0.125rem; /* 2px */
+  --space-2xs: 0.25rem; /* 4px */
+  --space-xs: 0.375rem; /* 6px */
+  --space-sm: 0.5rem; /* 8px */
+  --space-md: 0.75rem; /* 12px */
+  --space-lg: 1rem; /* 16px */
+  --space-xl: 1.5rem; /* 24px */
+  --space-2xl: 2rem; /* 32px */
+  --space-3xl: 3rem; /* 48px */
+  --space-4xl: 4rem; /* 64px */
+}
+
+body {
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
