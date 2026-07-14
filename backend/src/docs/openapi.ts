@@ -422,8 +422,14 @@ export const openapiSpec = {
                           sub_title: { type: "string", nullable: true },
                           competition: { type: "string", nullable: true },
                           competition_scope: { type: "string", nullable: true },
-                          status: { type: "string", nullable: true },
-                          open_time: { type: "string", nullable: true },
+                          status: { type: "string", nullable: true, description: "Raw ingestion-time status column -- set once at ingest and never updated again, so it goes stale the moment any prediction settles. Prefer live_status." },
+                          live_status: {
+                            type: "string",
+                            enum: ["open", "in_progress", "completed"],
+                            description: "Freshly-derived event state, computed on every read from match_start_time (falling back to open_time for pre-migration rows) and whether any prediction is still pending: 'completed' once at least one prediction exists and none are pending; 'in_progress' once at least one pending prediction exists and match_start_time has passed; 'open' otherwise (including an event that's started but never received a single bet).",
+                          },
+                          open_time: { type: "string", nullable: true, description: "When Kalshi opened this event's earliest market for trading -- often days before the real match. Not a reliable 'has it started' signal; prefer match_start_time / live_status." },
+                          match_start_time: { type: "string", nullable: true, description: "The real-world match kickoff, sourced from Kalshi's occurrence_datetime. Null for events ingested before this field existed." },
                           close_time: { type: "string", nullable: true },
                           created_at: { type: "string" },
                           market_count: { type: "number" },
@@ -581,7 +587,11 @@ export const openapiSpec = {
                     data: {
                       type: "object",
                       properties: {
-                        event: { type: "object" },
+                        event: {
+                          type: "object",
+                          description:
+                            "Includes live_status: 'open' | 'in_progress' | 'completed', freshly derived on every read from match_start_time (the real match kickoff, sourced from Kalshi's occurrence_datetime -- falls back to open_time for pre-migration rows) and whether any prediction is still pending -- not the raw (and stale-after-settlement) status column. Also includes open_time (when Kalshi opened the market for trading, often days before match_start_time) and match_start_time directly.",
+                        },
                         markets: { type: "array", items: { type: "object" } },
                         priceHistory: { type: "array", items: { type: "object" } },
                         forecastHistory: { type: "array", items: { type: "object" } },
@@ -595,12 +605,17 @@ export const openapiSpec = {
                         strategies: {
                           type: "array",
                           items: { type: "object" },
-                          description: "Per-model overall strategy notes for this consolidated event: model_name, strategy_notes, created_at.",
+                          description: "Per-model overall strategy notes for this consolidated event: model_name, strategy_notes, strategy_headline (nullable -- null for rows written before that column existed), created_at.",
                         },
                         leaderboard: {
                           type: "array",
                           items: { type: "object" },
-                          description: "Event-level leaderboard for participating models: model_name, starting_balance, ending_balance, percent_change, event_rank, prediction_count, strategy_notes.",
+                          description: "Event-level leaderboard for participating models: model_name, starting_balance, ending_balance, percent_change, event_rank, prediction_count, strategy_notes, strategy_headline.",
+                        },
+                        starting_balances: {
+                          type: "object",
+                          additionalProperties: { type: "number" },
+                          description: "Every model's starting bankroll ('pot') for this specific event, keyed by model_name -- prefers model_event_results.starting_balance, falls back to the model's current live overall balance before that's seeded. Use this as the baseline for any per-event chart/display; do not assume a fresh $10 per event, since balances carry forward continuously across matches.",
                         },
                       },
                     },
@@ -699,6 +714,70 @@ export const openapiSpec = {
                 },
               },
             },
+          },
+        },
+      },
+    },
+    "/events/market-snapshot": {
+      get: {
+        summary: "Volume-sorted live-ish price snapshot of every market in an event, for the EventScreen Markets panel",
+        description:
+          "For each market in the event, prefers the latest market_price_history row if one exists (is_live_priced: true, as_of = that row's period_end_ts), else falls back to the ingestion-time markets row (is_live_priced: false, as_of = ingestion time). Note market_price_history is written by both ingestion-time candlestick backfill and the live value poller (valuePoller.ts) -- is_live_priced doesn't strictly mean 'from the last 10 minutes', it means 'has a real timestamped price point'. Render as_of directly rather than inferring freshness from is_live_priced alone. Sorted by resolved volume descending, server-side. Only market label is meant to be shown to end users -- ticker/event_ticker are included for internal lookups only.",
+        parameters: [
+          {
+            name: "event_id",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "The consolidated parent event id (UUID).",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Snapshot retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        event_id: { type: "string" },
+                        markets: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              ticker: { type: "string" },
+                              event_ticker: { type: "string" },
+                              label: { type: "string", nullable: true },
+                              price: { type: "number", nullable: true },
+                              volume: { type: "number", nullable: true },
+                              as_of: { type: "string", nullable: true },
+                              is_live_priced: { type: "boolean" },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "404": {
+            description: "No ingested event found for that id",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Database read failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
           },
         },
       },
@@ -1301,6 +1380,100 @@ export const openapiSpec = {
           },
           "502": {
             description: "Kalshi request failed (unknown ticker, etc.)",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/value-history": {
+      get: {
+        summary: "Live mark-to-market bankroll history per model for one event, over time",
+        description:
+          "Reads the persisted output of the server-side value poller (backend/src/agent/valuePoller.ts): every 10 minutes, for each event that has started (Kalshi-sourced match_start_time, the real match kickoff -- not open_time, which is when Kalshi opened the market for trading and is routinely days earlier), has at least one prediction placed, and still has a pending prediction, the poller live-fetches Kalshi and writes each model's current mark-to-market bankroll for that event to model_event_value_snapshots. This endpoint is a pure DB read of that history (one series per model, ordered by snapshot_ts) -- it never calls Kalshi itself, so it's safe to poll from the frontend as often as needed. Distinct from GET /events/detail's leaderboard, which only has the one final ending_balance written at settlement; this has the whole path to get there. Returns an empty array for an event with no bets yet, or one that hasn't started, or one that's already fully settled (the poller only writes new points for events currently live).",
+        parameters: [
+          {
+            name: "event_id",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "The consolidated parent event id (UUID) to read value history for.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Value history retrieved successfully (possibly empty)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          model_name: { type: "string" },
+                          points: {
+                            type: "array",
+                            items: {
+                              type: "object",
+                              properties: {
+                                snapshot_ts: { type: "string", format: "date-time" },
+                                unrealized_balance: { type: "number" },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Database read failed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+        },
+      },
+    },
+    "/agent/system-prompt": {
+      get: {
+        summary: "Renders the agent system prompt, adapted for one model, one event, and a custom backend URL",
+        description:
+          "Reads backend/prediction-market-agent-system-prompt.md and substitutes {{CURRENT_EVENT_ID}}, {{YOUR_MODEL_NAME}}, and {{BACKEND_BASE_URL}} with the given query params or auto-inferred request host context. Backs the EventScreen 'Copy system prompt' control in a model's Predictions view. Pure text substitution, no DB or Kalshi calls.",
+        parameters: [
+          { name: "event_id", in: "query", required: true, schema: { type: "string" }, description: "Consolidated parent event id to fill into {{CURRENT_EVENT_ID}}." },
+          { name: "model_name", in: "query", required: true, schema: { type: "string" }, description: "Model name to fill into {{YOUR_MODEL_NAME}}, e.g. sonnet-5." },
+          { name: "backend_base_url", in: "query", required: false, schema: { type: "string" }, description: "Base URL to fill into {{BACKEND_BASE_URL}}. If omitted, defaults to the request host/protocol." },
+        ],
+        responses: {
+          "200": {
+            description: "Prompt rendered successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: { type: "object", properties: { prompt: { type: "string" } } },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' or 'model_name' query param",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
+          },
+          "502": {
+            description: "Failed to read the prompt file",
             content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean", example: false }, error: { type: "string" } } } } },
           },
         },

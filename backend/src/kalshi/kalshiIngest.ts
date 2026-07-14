@@ -104,6 +104,11 @@ export async function ingestKalshiEvent(
   const { min: openTime, max: closeTime } = minMaxIso(
     bundle.markets.flatMap((m) => [m.open_time, m.close_time])
   );
+  // Earliest real-world occurrence across this bundle's markets -- distinct
+  // from openTime (see minMaxIso() above), which is when Kalshi opened the
+  // market for trading, often days before the match itself. Null when no
+  // market in this bundle reports it (not every Kalshi market type does).
+  const { min: matchStartTime } = minMaxIso(bundle.markets.map((m) => m.match_start_time));
   const status = deriveEventStatus(bundle.markets);
 
   if (!existingEvent) {
@@ -116,6 +121,7 @@ export async function ingestKalshiEvent(
       competition_scope: bundle.event.competition_scope ?? null,
       open_time: openTime,
       close_time: closeTime,
+      match_start_time: matchStartTime,
       status,
     });
     if (eventInsertError) {
@@ -127,13 +133,19 @@ export async function ingestKalshiEvent(
     }
   } else {
     // Update parent event's bounding window times
-    const { data: currentEvent } = await supabase.from("events").select("open_time, close_time").eq("id", eventId).single();
+    const { data: currentEvent } = await supabase
+      .from("events")
+      .select("open_time, close_time, match_start_time")
+      .eq("id", eventId)
+      .single();
     if (currentEvent) {
       const newOpen = minMaxIso([currentEvent.open_time, openTime]).min;
       const newClose = minMaxIso([currentEvent.close_time, closeTime]).max;
+      const newMatchStart = minMaxIso([currentEvent.match_start_time, matchStartTime]).min;
       await supabase.from("events").update({
         open_time: newOpen,
         close_time: newClose,
+        match_start_time: newMatchStart,
       }).eq("id", eventId);
     }
   }

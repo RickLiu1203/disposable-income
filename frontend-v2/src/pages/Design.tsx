@@ -8,6 +8,8 @@ import {
   LineChart,
   ListRow,
   LlmLogo,
+  Modal,
+  Skeleton,
   StatTile,
   Toast,
   Toggle,
@@ -81,6 +83,7 @@ function Design() {
   const [outcome, setOutcome] = useState("Yes");
   const [sortBy, setSortBy] = useState("balance");
   const [toastOpen, setToastOpen] = useState(true);
+  const [modalOpen, setModalOpen] = useState(false);
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-12 text-neutral-900">
@@ -226,6 +229,26 @@ function Design() {
 
           <div className="mt-6">
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              Skeleton
+            </div>
+            <Card>
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-3.5 w-2/3" />
+                  <Skeleton className="h-2.5 w-1/3" />
+                </div>
+                <Skeleton className="h-5 w-14 shrink-0" />
+              </div>
+              <div className="mt-3 flex items-center justify-between">
+                <Skeleton className="h-2.5 w-16" />
+                <Skeleton className="h-2.5 w-12" />
+              </div>
+              <Skeleton className="mt-4 h-8 w-full" />
+            </Card>
+          </div>
+
+          <div className="mt-6">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
               Stat tile
             </div>
             <div className="flex gap-3">
@@ -276,6 +299,20 @@ function Design() {
               Dropdown
             </div>
             <Dropdown options={sortOptions} value={sortBy} onChange={setSortBy} />
+          </div>
+
+          <div className="mt-6">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              Modal
+            </div>
+            <Button variant="secondary" onClick={() => setModalOpen(true)}>
+              Open modal
+            </Button>
+            <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Submit predictions">
+              <p className="text-sm text-neutral-600">
+                Drag and drop one or more prediction JSON files here.
+              </p>
+            </Modal>
           </div>
 
           <div className="mt-6">

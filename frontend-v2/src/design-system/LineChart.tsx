@@ -7,6 +7,8 @@ export interface LineChartSeries {
   name: string
   shortName?: string
   badge: string
+  /** Optional brand icon image src, rendered in place of the `badge` initials. */
+  badgeIcon?: string
   values: number[]
   /** Overrides the computed up/down trend used for the click highlight and popover. */
   positive?: boolean
@@ -39,6 +41,19 @@ function scaleLinear(domain: [number, number], range: [number, number]) {
 function niceTicks(min: number, max: number, count: number) {
   const step = (max - min) / (count - 1)
   return Array.from({ length: count }, (_, i) => Math.round(min + step * i))
+}
+
+// Caps how many x-axis labels render at once so they never crowd together --
+// full-resolution data still backs the line itself and the hover tooltip,
+// this only thins the ticks drawn along the bottom.
+const MAX_X_LABELS = 6
+
+function pickLabelIndices(length: number, max: number): number[] {
+  if (length <= max) return Array.from({ length }, (_, i) => i)
+  const step = (length - 1) / (max - 1)
+  const indices = new Set<number>()
+  for (let i = 0; i < max; i++) indices.add(Math.round(i * step))
+  return Array.from(indices).sort((a, b) => a - b)
 }
 
 function isSeriesPositive(s: LineChartSeries) {
@@ -94,6 +109,7 @@ export function LineChart({
   const x = scaleLinear([0, xLabels.length - 1], [mL, mL + plotW])
   const y = scaleLinear([yMin, yMax], [mT + plotH, mT])
   const ticks = niceTicks(yMin, yMax, 5)
+  const xLabelIndices = pickLabelIndices(xLabels.length, MAX_X_LABELS)
 
   function colorClass(i: number, kind: "line" | "dot") {
     const isSelected = selected?.series === i
@@ -167,11 +183,15 @@ export function LineChart({
             >
               <span
                 className={cx(
-                  "flex h-[18px] w-[18px] items-center justify-center rounded text-[8px] font-bold",
-                  isSelected ? trendChip : "bg-accent-100 text-accent-700",
+                  "flex h-[18px] w-[18px] items-center justify-center overflow-hidden rounded text-[8px] font-bold",
+                  isSelected ? trendChip : "bg-primary-100 text-primary-700",
                 )}
               >
-                {s.badge}
+                {s.badgeIcon ? (
+                  <img src={s.badgeIcon} alt={s.badge} className="h-full w-full object-contain p-0.5" />
+                ) : (
+                  s.badge
+                )}
               </span>
               {s.shortName ?? s.name}
             </button>
@@ -189,15 +209,15 @@ export function LineChart({
               </text>
             </g>
           ))}
-          {xLabels.map((label, i) => (
+          {xLabelIndices.map((i) => (
             <text
-              key={label + i}
+              key={xLabels[i] + i}
               x={x(i)}
               y={mT + plotH + 18}
               textAnchor="middle"
               className="fill-neutral-400 text-[10px]"
             >
-              {label}
+              {xLabels[i]}
             </text>
           ))}
 
@@ -227,20 +247,24 @@ export function LineChart({
                   width={22}
                   height={22}
                   rx={6}
-                  className={isSelected ? (positive ? "fill-success-50" : "fill-error-50") : "fill-accent-50"}
+                  className={isSelected ? (positive ? "fill-success-50" : "fill-error-50") : "fill-primary-50"}
                 />
-                <text
-                  x={ex + 20}
-                  y={ey + 1}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  className={cx(
-                    "text-[9px] font-bold",
-                    isSelected ? (positive ? "fill-success-700" : "fill-error-700") : "fill-accent-700",
-                  )}
-                >
-                  {s.badge}
-                </text>
+                {s.badgeIcon ? (
+                  <image href={s.badgeIcon} x={ex + 13} y={ey - 7} width={14} height={14} />
+                ) : (
+                  <text
+                    x={ex + 20}
+                    y={ey + 1}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    className={cx(
+                      "text-[9px] font-bold",
+                      isSelected ? (positive ? "fill-success-700" : "fill-error-700") : "fill-primary-700",
+                    )}
+                  >
+                    {s.badge}
+                  </text>
+                )}
                 <text x={ex + 34} y={ey + 4} className="fill-neutral-900 text-[11px] font-bold">
                   {valueFormat(s.values[lastI])}
                 </text>
@@ -302,11 +326,15 @@ export function LineChart({
                 <div className="flex items-center gap-1.5 font-semibold">
                   <span
                     className={cx(
-                      "flex h-3.5 w-3.5 items-center justify-center rounded text-[7px] font-bold",
+                      "flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded text-[7px] font-bold",
                       positive ? "bg-success-600" : "bg-error-600",
                     )}
                   >
-                    {s.badge}
+                    {s.badgeIcon ? (
+                      <img src={s.badgeIcon} alt={s.badge} className="h-full w-full object-contain p-px" />
+                    ) : (
+                      s.badge
+                    )}
                   </span>
                   {s.shortName ?? s.name}
                 </div>
@@ -331,15 +359,19 @@ export function LineChart({
             <div key={s.key} className="flex items-center gap-1.5">
               <span
                 className={cx(
-                  "flex h-3.5 w-3.5 items-center justify-center rounded-[3px] text-[6.5px] font-bold",
+                  "flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[3px] text-[6.5px] font-bold",
                   selected?.series === i
                     ? isSeriesPositive(s)
                       ? "bg-success-600 text-white"
                       : "bg-error-600 text-white"
-                    : "bg-accent-100 text-accent-700",
+                    : "bg-primary-100 text-primary-700",
                 )}
               >
-                {s.badge}
+                {s.badgeIcon ? (
+                  <img src={s.badgeIcon} alt={s.badge} className="h-full w-full object-contain p-px" />
+                ) : (
+                  s.badge
+                )}
               </span>
               <span>{s.shortName ?? s.name}</span>
               <span className="ml-auto pl-3 font-bold tabular-nums">{valueFormat(s.values[hover.index])}</span>

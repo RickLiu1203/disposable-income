@@ -1,20 +1,20 @@
-import type { ReactNode } from "react"
+import type { HTMLAttributes, ReactNode } from "react"
 import { cx } from "../lib/cx"
 
-interface ListRowProps {
+interface ListRowProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
   logo: ReactNode
-  title: string
+  title: ReactNode
   subtitle: ReactNode
-  className?: string
 }
 
-export function ListRow({ logo, title, subtitle, className }: ListRowProps) {
+export function ListRow({ logo, title, subtitle, className, ...props }: ListRowProps) {
   return (
     <div
       className={cx(
         "flex items-center gap-2.5 rounded-md border-b border-neutral-100 px-1.5 py-2.5 last:border-b-0 hover:bg-neutral-50",
         className,
       )}
+      {...props}
     >
       {logo}
       <div className="flex min-w-0 flex-col gap-px">

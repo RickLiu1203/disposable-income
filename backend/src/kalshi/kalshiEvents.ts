@@ -10,6 +10,12 @@ export interface KalshiMarket {
   no_sub_title?: string;
   open_time?: string;
   close_time?: string;
+  // The real-world moment this market's underlying event actually happens --
+  // distinct from open_time, which is when Kalshi opened the market for
+  // trading (often days earlier for sports markets). expected_expiration_time
+  // tracks the same instant when Kalshi omits occurrence_datetime.
+  occurrence_datetime?: string;
+  expected_expiration_time?: string;
   status?: string;
   // Kalshi returns all of these as numeric strings, not JSON numbers.
   yes_bid_dollars?: string;
@@ -359,6 +365,7 @@ export interface CompactMarket {
   open_interest: number | null;
   open_time?: string;
   close_time?: string;
+  match_start_time?: string;
   rules?: string;
 }
 
@@ -418,6 +425,7 @@ export function toCompactBundle(bundle: EventBundle): CompactEventBundle {
       open_interest: parseNum(m.open_interest_fp),
       open_time: m.open_time,
       close_time: m.close_time,
+      match_start_time: m.occurrence_datetime ?? m.expected_expiration_time,
       rules: m.rules_primary as string | undefined,
     })),
   };

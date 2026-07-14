@@ -5,6 +5,7 @@ import { getExchangeStatus } from "./kalshi/kalshi";
 import { getEventBundle, resolveKalshiMarketUrl, getMilestoneRelatedTickers } from "./kalshi/kalshiEvents";
 import { EventAlreadyIngestedError, ingestKalshiEvent } from "./kalshi/kalshiIngest";
 import { getEventDetail, listEvents, getLifetimeLeaderboard } from "./events/eventsRead";
+import { getMarketSnapshot } from "./events/marketSnapshot";
 import { deleteEvent } from "./events/eventsDelete";
 import { settleEvent, adjustModelEndingBalance } from "./kalshi/kalshiSettle";
 import { getServerTime } from "./polymarket/polymarket";
@@ -27,6 +28,8 @@ import {
   getForecastSummary,
   getMarketDetail,
 } from "./agent/agentKalshi";
+import { startValuePolling, getValueHistory } from "./agent/valuePoller";
+import { renderSystemPrompt } from "./agent/systemPromptTemplate";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -347,6 +350,24 @@ app.get("/events/detail", async (req, res) => {
   }
 });
 
+app.get("/events/market-snapshot", async (req, res) => {
+  const eventId = req.query.event_id;
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  try {
+    const data = await getMarketSnapshot(eventId);
+    if (!data) {
+      res.status(404).json({ ok: false, error: `No ingested event found for ID '${eventId}'` });
+      return;
+    }
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
 app.post("/predictions/settle", async (req, res) => {
   const eventTicker = req.query.event_ticker;
   const eventId = req.query.event_id;
@@ -601,6 +622,41 @@ app.get("/agent/market-detail", async (req, res) => {
   }
 });
 
+app.get("/agent/value-history", async (req, res) => {
+  const eventId = req.query.event_id;
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  try {
+    const data = await getValueHistory(eventId);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
+app.get("/agent/system-prompt", async (req, res) => {
+  const eventId = req.query.event_id;
+  const modelName = req.query.model_name;
+  if (typeof eventId !== "string" || typeof modelName !== "string") {
+    res.status(400).json({ ok: false, error: "Query params 'event_id' and 'model_name' are required" });
+    return;
+  }
+  try {
+    const host = req.get("host") || "localhost:3000";
+    const protocol = req.protocol || "http";
+    const defaultBaseUrl = `${protocol}://${host}`;
+    const queryBaseUrl = typeof req.query.backend_base_url === "string" ? req.query.backend_base_url : undefined;
+    const backendBaseUrl = queryBaseUrl || defaultBaseUrl;
+
+    const prompt = renderSystemPrompt(eventId, modelName, backendBaseUrl);
+    res.json({ ok: true, data: { prompt } });
+  } catch (error) {
+    res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });
+  }
+});
+
 app.get("/polymarket/search-events", async (req, res) => {
   const q = req.query.q;
 
@@ -676,4 +732,5 @@ app.get("/polymarket/match-bundle", async (req, res) => {
 
 app.listen(port, () => {
   console.log(`Backend listening on http://localhost:${port}`);
+  startValuePolling();
 });

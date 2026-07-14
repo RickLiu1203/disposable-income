@@ -115,6 +115,15 @@
   --color-error-50: #fef2f2;
   --color-error-600: #dc2626;
   --color-error-700: #b91c1c;
+
+  /* ---- Motion ---- */
+  --animate-shimmer: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
 }
 
 /*

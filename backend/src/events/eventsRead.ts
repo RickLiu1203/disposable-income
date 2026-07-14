@@ -1,4 +1,6 @@
 import { getSupabaseClient } from "../supabase/supabaseClient";
+import { computeEventStatus, type LiveEventStatus } from "./eventStatus";
+import { getEventStartingBalances } from "./startingBalances";
 
 export interface EventListItem {
   id: string; // consolidated parent event_id
@@ -7,7 +9,9 @@ export interface EventListItem {
   competition: string | null;
   competition_scope: string | null;
   status: string | null;
+  live_status: LiveEventStatus;
   open_time: string | null;
+  match_start_time: string | null;
   close_time: string | null;
   created_at: string;
   market_count: number;
@@ -23,7 +27,7 @@ export async function listEvents(): Promise<EventListItem[]> {
   const { data, error } = await supabase
     .from("events")
     .select(
-      "id, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at, event_tickers(event_ticker, series_ticker, title), markets(count)"
+      "id, event_name, sub_title, competition, competition_scope, status, open_time, match_start_time, close_time, created_at, event_tickers(event_ticker, series_ticker, title), markets(count), predictions(outcome)"
     )
     .order("created_at", { ascending: false });
 
@@ -39,10 +43,12 @@ export async function listEvents(): Promise<EventListItem[]> {
     competition_scope: string | null;
     status: string | null;
     open_time: string | null;
+    match_start_time: string | null;
     close_time: string | null;
     created_at: string;
     event_tickers: Array<{ event_ticker: string; series_ticker: string; title: string }>;
     markets: { count: number }[];
+    predictions: { outcome: string }[];
   };
 
   return ((data ?? []) as unknown as Row[]).map((row) => ({
@@ -52,7 +58,13 @@ export async function listEvents(): Promise<EventListItem[]> {
     competition: row.competition,
     competition_scope: row.competition_scope,
     status: row.status,
+    live_status: computeEventStatus({
+      matchStartTime: row.match_start_time ?? row.open_time,
+      totalPredictions: row.predictions.length,
+      pendingPredictions: row.predictions.filter((p) => p.outcome === "pending").length,
+    }),
     open_time: row.open_time,
+    match_start_time: row.match_start_time,
     close_time: row.close_time,
     created_at: row.created_at,
     market_count: row.markets[0]?.count ?? 0,
@@ -114,6 +126,7 @@ interface PredictionRow {
 interface StrategyRow {
   model_name: string;
   strategy_notes: string;
+  strategy_headline: string | null;
   created_at: string;
 }
 
@@ -125,6 +138,7 @@ export interface EventLeaderboardRow {
   event_rank: number;
   prediction_count: number;
   strategy_notes: string | null;
+  strategy_headline: string | null;
 }
 
 export interface EventDetail {
@@ -135,7 +149,9 @@ export interface EventDetail {
     competition: string | null;
     competition_scope: string | null;
     status: string | null;
+    live_status: LiveEventStatus;
     open_time: string | null;
+    match_start_time: string | null;
     close_time: string | null;
     created_at: string;
   };
@@ -155,6 +171,12 @@ export interface EventDetail {
   predictions: PredictionRow[];
   strategies: StrategyRow[];
   leaderboard: EventLeaderboardRow[];
+  /** Each model's starting bankroll for this specific event -- the "pot" it
+   * brought into the match, carried over from wherever its balance stood
+   * after its last settled event (or 10 if this is its first ever). Use
+   * this as the baseline for any per-event chart/display; do not assume a
+   * fresh $10 per event. See startingBalances.ts. */
+  starting_balances: Record<string, number>;
 }
 
 export async function getEventDetail(eventId: string): Promise<EventDetail | null> {
@@ -162,7 +184,9 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
 
   const { data: event, error: eventError } = await supabase
     .from("events")
-    .select("id, event_name, sub_title, competition, competition_scope, status, open_time, close_time, created_at")
+    .select(
+      "id, event_name, sub_title, competition, competition_scope, status, open_time, match_start_time, close_time, created_at"
+    )
     .eq("id", eventId)
     .maybeSingle();
   if (eventError) {
@@ -259,7 +283,7 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
   // Load per-model strategy notes for this consolidated event
   const { data: strategyRows, error: strategiesError } = await supabase
     .from("model_event_strategies")
-    .select("model_name, strategy_notes, created_at")
+    .select("model_name, strategy_notes, strategy_headline, created_at")
     .eq("event_id", eventId);
   if (strategiesError) {
     throw new Error(`Failed to load strategy notes for event ${eventId}: ${strategiesError.message}`);
@@ -285,8 +309,21 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
       event_rank: Number(row.event_rank),
       prediction_count: Number(row.prediction_count),
       strategy_notes: strategy ? strategy.strategy_notes : null,
+      strategy_headline: strategy ? strategy.strategy_headline : null,
     };
   });
+
+  const predictionRowsList = (predictionRows ?? []) as PredictionRow[];
+
+  // Each model's starting bankroll ("pot") for this event -- shared logic
+  // with the value poller, since both need the exact same
+  // settled-or-carried-over-live-balance fallback.
+  const { data: modelRows, error: modelsError } = await supabase.from("models").select("model_name");
+  if (modelsError) {
+    throw new Error(`Failed to load model roster: ${modelsError.message}`);
+  }
+  const allModelNames = ((modelRows ?? []) as { model_name: string }[]).map((m) => m.model_name);
+  const startingBalances = await getEventStartingBalances(eventId, allModelNames);
 
   return {
     event: {
@@ -296,7 +333,13 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
       competition: event.competition,
       competition_scope: event.competition_scope,
       status: event.status,
+      live_status: computeEventStatus({
+        matchStartTime: event.match_start_time ?? event.open_time,
+        totalPredictions: predictionRowsList.length,
+        pendingPredictions: predictionRowsList.filter((p) => p.outcome === "pending").length,
+      }),
       open_time: event.open_time,
+      match_start_time: event.match_start_time,
       close_time: event.close_time,
       created_at: event.created_at,
     },
@@ -304,9 +347,10 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
     markets: (markets ?? []) as MarketRow[],
     priceHistory,
     forecastHistory,
-    predictions: (predictionRows ?? []) as PredictionRow[],
+    predictions: predictionRowsList,
     strategies: (strategyRows ?? []) as StrategyRow[],
     leaderboard,
+    starting_balances: startingBalances,
   };
 }
 

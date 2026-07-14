@@ -4,9 +4,9 @@
 
 ### CONTEXT VARIABLES (Orchestrator to populate before sending to the model)
 
-- **CURRENT_EVENT_ID**: 5828071f-2c20-4645-b9fc-4d777a8bb998
-- **YOUR_MODEL_NAME**: opus-4.8
-- **BACKEND_BASE_URL**: http://localhost:3000
+- **CURRENT_EVENT_ID**: {{CURRENT_EVENT_ID}}
+- **YOUR_MODEL_NAME**: {{YOUR_MODEL_NAME}}
+- **BACKEND_BASE_URL**: {{BACKEND_BASE_URL}}
 - **RELEVANT_RESOURCES_AND_LINKS**:
   https://en.wikipedia.org/wiki/2026_FIFA_World_Cup
 

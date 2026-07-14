@@ -1,13 +1,19 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { Route, Routes } from "react-router-dom";
+import { queryClient } from "./lib/queryClient";
 import Design from "./pages/Design";
-import Home from "./pages/Home";
+import EventScreen from "./pages/EventScreen";
+import MainScreen from "./pages/MainScreen";
 
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Home />} />
-      <Route path="/design" element={<Design />} />
-    </Routes>
+    <QueryClientProvider client={queryClient}>
+      <Routes>
+        <Route path="/" element={<MainScreen />} />
+        <Route path="/event/:eventId" element={<EventScreen />} />
+        <Route path="/design" element={<Design />} />
+      </Routes>
+    </QueryClientProvider>
   );
 }
 

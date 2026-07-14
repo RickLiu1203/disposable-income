@@ -6,8 +6,8 @@ type Trend = "up" | "down" | "flat"
 interface StatTileProps {
   label: string
   value: string
-  delta: string
-  trend: Trend
+  delta?: string
+  trend?: Trend
   icon?: ReactNode
   sparkline?: number[]
   className?: string
@@ -64,8 +64,8 @@ export function StatTile({
       <div className="my-0.5 text-xl font-bold tabular-nums text-neutral-900">
         {value}
       </div>
-      <div className={cx("text-xs font-semibold", deltaColor[trend])}>{delta}</div>
-      {sparkline && sparkline.length > 1 && (
+      {delta && trend && <div className={cx("text-xs font-semibold", deltaColor[trend])}>{delta}</div>}
+      {sparkline && sparkline.length > 1 && trend && (
         <svg
           viewBox="0 0 120 32"
           preserveAspectRatio="none"
