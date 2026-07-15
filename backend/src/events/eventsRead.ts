@@ -374,3 +374,26 @@ export async function getLifetimeLeaderboard(): Promise<LifetimeLeaderboardRow[]
   }
   return (data ?? []) as LifetimeLeaderboardRow[];
 }
+
+export interface BalanceHistoryRow {
+  event_id: string;
+  model_name: string;
+  ending_balance: number | null;
+}
+
+// Backs the MainScreen per-event balance-history chart. That chart used to
+// be built client-side by calling GET /events/detail once per event just to
+// read each response's leaderboard.ending_balance -- N heavy fetches (full
+// markets/predictions/price-history/forecast bundles) to extract a handful
+// of numbers each. This is the same data in one cheap query straight
+// against model_event_results, no per-event fan-out.
+export async function getBalanceHistory(): Promise<BalanceHistoryRow[]> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("model_event_results")
+    .select("event_id, model_name, ending_balance");
+  if (error) {
+    throw new Error(`Failed to load balance history: ${error.message}`);
+  }
+  return (data ?? []) as BalanceHistoryRow[];
+}

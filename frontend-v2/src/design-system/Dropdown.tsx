@@ -90,7 +90,7 @@ export function Dropdown({ options, value, onChange, className }: DropdownProps)
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   className={cx(
-                    "h-3.5 w-3.5 shrink-0 text-accent-600",
+                    "h-3.5 w-3.5 shrink-0 text-secondary-600",
                     isSelected ? "visible" : "invisible",
                   )}
                 >

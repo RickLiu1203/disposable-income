@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type { MouseEvent as ReactMouseEvent, PointerEvent } from "react"
 import { cx } from "../lib/cx"
+import { smoothPath } from "../lib/smoothPath"
 
 export interface LineChartSeries {
   key: string
@@ -23,10 +24,10 @@ interface LineChartProps {
   className?: string
 }
 
-// Lines share the accent hue at rest; opacity is the only thing that
+// Lines share the secondary hue at rest; opacity is the only thing that
 // separates overlapping series. The click highlight is the only place
 // color communicates meaning (green/red for up/down).
-const ACCENT_OPACITIES = [1, 0.6, 0.35]
+const LINE_OPACITIES = [1, 0.6, 0.35]
 
 // How close (in svg units, out of a 240-tall viewBox) a click needs to
 // land to a line before it counts as clicking that line.
@@ -69,6 +70,39 @@ function seriesDeltaText(s: LineChartSeries) {
   return `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`
 }
 
+// End-of-line badge+value labels sit at each series' true final y position,
+// which overlap illegibly whenever two series end at similar values (a
+// common case here -- several models often converge to a similar bankroll).
+// Nudges only the label position apart to a minimum gap, sorted by true
+// value, then pushes the whole stack back inside [minY, maxY] if it
+// overflowed -- the line itself still terminates at its real, un-nudged y.
+function declutterLabelYs(trueYs: number[], minGap: number, minY: number, maxY: number): number[] {
+  const order = trueYs.map((_, i) => i).sort((a, b) => trueYs[a] - trueYs[b])
+  const adjusted = [...trueYs]
+  for (let k = 1; k < order.length; k++) {
+    const prev = order[k - 1]
+    const cur = order[k]
+    if (adjusted[cur] - adjusted[prev] < minGap) {
+      adjusted[cur] = adjusted[prev] + minGap
+    }
+  }
+  if (order.length > 0) {
+    const overflow = adjusted[order[order.length - 1]] - maxY
+    if (overflow > 0) {
+      order.forEach((idx) => {
+        adjusted[idx] -= overflow
+      })
+    }
+    const shortfall = minY - adjusted[order[0]]
+    if (shortfall > 0) {
+      order.forEach((idx) => {
+        adjusted[idx] += shortfall
+      })
+    }
+  }
+  return adjusted
+}
+
 export function LineChart({
   series,
   xLabels,
@@ -100,16 +134,23 @@ export function LineChart({
   const plotH = H - mT - mB
 
   const allValues = series.flatMap((s) => s.values)
-  const rawMin = Math.min(...allValues)
   const rawMax = Math.max(...allValues)
-  const pad = (rawMax - rawMin || 2) * 0.2
-  const yMin = Math.floor((rawMin - pad) / 2) * 2
+  // Always floored at $0 -- these are bankroll values, never negative, and
+  // a fixed zero baseline makes the trend read as "gained/lost from
+  // nothing" rather than an arbitrary padded window.
+  const yMin = 0
+  const pad = (rawMax || 2) * 0.2
   const yMax = Math.ceil((rawMax + pad) / 2) * 2
 
   const x = scaleLinear([0, xLabels.length - 1], [mL, mL + plotW])
   const y = scaleLinear([yMin, yMax], [mT + plotH, mT])
   const ticks = niceTicks(yMin, yMax, 5)
   const xLabelIndices = pickLabelIndices(xLabels.length, MAX_X_LABELS)
+
+  // Declutter the end-of-line badge+value labels -- see declutterLabelYs().
+  const LABEL_MIN_GAP = 24
+  const trueEndYs = series.map((s) => y(s.values[s.values.length - 1]))
+  const labelYs = declutterLabelYs(trueEndYs, LABEL_MIN_GAP, mT + 12, mT + plotH + 6)
 
   function colorClass(i: number, kind: "line" | "dot") {
     const isSelected = selected?.series === i
@@ -120,7 +161,7 @@ export function LineChart({
       return positive ? "fill-success-600" : "fill-error-600"
     }
     if (isDimmed) return kind === "line" ? "stroke-neutral-300" : "fill-neutral-300"
-    return kind === "line" ? "stroke-accent-500" : "fill-accent-500"
+    return kind === "line" ? "stroke-secondary-500" : "fill-secondary-500"
   }
 
   function indexAt(clientX: number, svgRect: DOMRect) {
@@ -222,13 +263,13 @@ export function LineChart({
           ))}
 
           {series.map((s, i) => {
-            const d = s.values.map((v, j) => `${j === 0 ? "M" : "L"} ${x(j)} ${y(v)}`).join(" ")
+            const d = smoothPath(s.values.map((v, j) => ({ x: x(j), y: y(v) })))
             const lastI = s.values.length - 1
             const ex = x(lastI)
-            const ey = y(s.values[lastI])
+            const ey = labelYs[i]
             const isSelected = selected?.series === i
             const isDimmed = selected !== null && !isSelected
-            const restOpacity = ACCENT_OPACITIES[i % ACCENT_OPACITIES.length]
+            const restOpacity = LINE_OPACITIES[i % LINE_OPACITIES.length]
             const opacity = isSelected ? 1 : isDimmed ? 0.25 : restOpacity
             const positive = isSeriesPositive(s)
             return (
@@ -340,7 +381,7 @@ export function LineChart({
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5">
                   <span className="font-bold tabular-nums">{valueFormat(s.values[selected.idx])}</span>
-                  <span className={cx("font-semibold", positive ? "text-success-400" : "text-error-400")}>
+                  <span className={cx("font-semibold", positive ? "text-success-600" : "text-error-600")}>
                     {positive ? "▲" : "▼"} {seriesDeltaText(s)}
                   </span>
                 </div>

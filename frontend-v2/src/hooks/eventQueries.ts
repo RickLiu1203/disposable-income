@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
 import { getValueHistory } from "../services/agentService"
-import { getEventDetail, getLifetimeLeaderboard, getMarketSnapshot } from "../services/eventsService"
+import { getBalanceHistory, getEventDetail, getEvents, getLifetimeLeaderboard, getMarketSnapshot } from "../services/eventsService"
 
 export function useEventDetailQuery(eventId: string | undefined) {
   return useQuery({
@@ -22,6 +22,24 @@ export function useLifetimeRosterQuery() {
   return useQuery({
     queryKey: ["lifetimeLeaderboard"],
     queryFn: getLifetimeLeaderboard,
+  })
+}
+
+export function useEventsQuery() {
+  return useQuery({
+    queryKey: ["events"],
+    queryFn: getEvents,
+  })
+}
+
+/** One lightweight query backing the MainScreen leaderboard chart -- see
+ * getBalanceHistory()'s doc comment for why this replaced N per-event
+ * GET /events/detail fetches. Cached like every other query here, so
+ * navigating away from MainScreen and back doesn't refetch until stale. */
+export function useBalanceHistoryQuery() {
+  return useQuery({
+    queryKey: ["balanceHistory"],
+    queryFn: getBalanceHistory,
   })
 }
 

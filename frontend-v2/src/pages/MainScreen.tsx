@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   Button,
   Card,
@@ -13,35 +14,9 @@ import {
 import type { LineChartSeries } from "../design-system"
 import { PanelLayout } from "../layouts/PanelLayout"
 import { getModelIcon } from "../lib/modelIcons"
-
-type LiveEventStatus = "open" | "in_progress" | "completed"
-
-interface EventListItem {
-  id: string
-  event_name: string
-  sub_title: string | null
-  competition: string | null
-  competition_scope: string | null
-  live_status: LiveEventStatus
-  market_count: number
-  open_time: string | null
-  match_start_time: string | null
-  created_at: string
-}
-
-interface EventLeaderboardRow {
-  model_name: string
-  ending_balance: number | null
-}
-
-interface LifetimeLeaderboardRow {
-  model_name: string
-  events_participated: number
-  avg_percent_change: number
-  total_pnl: number
-  total_rewards_earned: number
-  lifetime_rank: number
-}
+import { useBalanceHistoryQuery, useEventsQuery, useLifetimeRosterQuery } from "../hooks/eventQueries"
+import { addEvent } from "../services/eventsService"
+import type { BalanceHistoryRow, EventListRow, LifetimeRosterRow, LiveEventStatus } from "../types/events"
 
 function statusChipVariant(status: LiveEventStatus): "neutral" | "primary" | "secondary" {
   if (status === "in_progress") return "primary"
@@ -63,151 +38,94 @@ function truncateLabel(label: string, max = 16): string {
 // silhouette rather than a uniform block.
 const CHART_SKELETON_BAR_HEIGHTS = [45, 68, 55, 82, 60, 40, 74, 52, 66, 78]
 
+// Pure derivation, no network/state involved -- balanceHistory is already
+// the flat {event_id, model_name, ending_balance} shape GET
+// /events/balance-history returns (one query, see useBalanceHistoryQuery),
+// so this is just indexing and a sort, cheap even for a long match history.
+function buildLeaderboardChart(
+  events: EventListRow[],
+  lifetimeLeaderboard: LifetimeRosterRow[],
+  balanceHistory: BalanceHistoryRow[],
+): { xLabels: string[]; series: LineChartSeries[] } {
+  if (events.length === 0 || lifetimeLeaderboard.length === 0) {
+    return { xLabels: [], series: [] }
+  }
+
+  const ordered = [...events].sort((a, b) => {
+    // match_start_time (the real match kickoff) orders these more
+    // accurately than open_time, which is when the Kalshi market opened
+    // for trading and can be days ahead of the actual match.
+    const at = new Date(a.match_start_time ?? a.open_time ?? a.created_at).getTime()
+    const bt = new Date(b.match_start_time ?? b.open_time ?? b.created_at).getTime()
+    return at - bt
+  })
+  const modelNames = lifetimeLeaderboard.map((row) => row.model_name)
+
+  const endingBalanceByEventModel = new Map<string, number>()
+  balanceHistory.forEach((row) => {
+    if (row.ending_balance !== null) {
+      endingBalanceByEventModel.set(`${row.event_id}:${row.model_name}`, row.ending_balance)
+    }
+  })
+
+  const balances: Record<string, number> = {}
+  const values: Record<string, number[]> = {}
+  modelNames.forEach((m) => {
+    balances[m] = 10
+    values[m] = []
+  })
+
+  ordered.forEach((e) => {
+    modelNames.forEach((m) => {
+      const ending = endingBalanceByEventModel.get(`${e.id}:${m}`)
+      if (ending !== undefined) balances[m] = ending
+      values[m].push(balances[m])
+    })
+  })
+
+  // Prepend an explicit $10 starting point for every model -- without it
+  // the first plotted value is already event 1's ending balance, so lines
+  // visibly start apart at wildly different heights instead of together at
+  // the real starting capital every model begins with.
+  return {
+    xLabels: ["Start", ...ordered.map((e) => truncateLabel(e.event_name))],
+    series: modelNames.map((m) => {
+      const { icon, badge } = getModelIcon(m)
+      return { key: m, name: m, badge, badgeIcon: icon, values: [10, ...values[m]] }
+    }),
+  }
+}
+
 function MainScreen() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
-  const [events, setEvents] = useState<EventListItem[]>([])
-  const [loadingEvents, setLoadingEvents] = useState(false)
-  const [eventsError, setEventsError] = useState<string | null>(null)
+  const eventsQuery = useEventsQuery()
+  const events = eventsQuery.data ?? []
+  const loadingEvents = eventsQuery.isFetching
+  const eventsError = eventsQuery.error instanceof Error ? eventsQuery.error.message : null
+
+  const lifetimeQuery = useLifetimeRosterQuery()
+  const lifetimeLeaderboard = lifetimeQuery.data ?? []
+  const loadingLifetime = lifetimeQuery.isFetching
+  const lifetimeError = lifetimeQuery.error instanceof Error ? lifetimeQuery.error.message : null
+
+  const balanceHistoryQuery = useBalanceHistoryQuery()
+  const balanceHistory = balanceHistoryQuery.data ?? []
+  const historyError = balanceHistoryQuery.error instanceof Error ? balanceHistoryQuery.error.message : null
 
   const [urlInput, setUrlInput] = useState("")
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
-
-  const [lifetimeLeaderboard, setLifetimeLeaderboard] = useState<LifetimeLeaderboardRow[]>([])
-  const [loadingLifetime, setLoadingLifetime] = useState(false)
-  const [lifetimeError, setLifetimeError] = useState<string | null>(null)
-
-  const [chartXLabels, setChartXLabels] = useState<string[]>([])
-  const [chartSeries, setChartSeries] = useState<LineChartSeries[]>([])
-  const [loadingHistory, setLoadingHistory] = useState(false)
-  const [historyError, setHistoryError] = useState<string | null>(null)
-
-  const fetchEvents = async () => {
-    setLoadingEvents(true)
-    setEventsError(null)
-    try {
-      const res = await fetch("/api/events")
-      const data = await res.json()
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || `HTTP error ${res.status}`)
-      }
-      setEvents(data.events)
-    } catch (err) {
-      setEventsError(err instanceof Error ? err.message : "Unknown error")
-    } finally {
-      setLoadingEvents(false)
-    }
-  }
-
-  const fetchLifetimeLeaderboard = async () => {
-    setLoadingLifetime(true)
-    setLifetimeError(null)
-    try {
-      const res = await fetch("/api/events/lifetime-leaderboard")
-      const data = await res.json()
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || `HTTP error ${res.status}`)
-      }
-      setLifetimeLeaderboard(data.data)
-    } catch (err) {
-      setLifetimeError(err instanceof Error ? err.message : "Unknown error")
-    } finally {
-      setLoadingLifetime(false)
-    }
-  }
-
-  useEffect(() => {
-    fetchEvents()
-    fetchLifetimeLeaderboard()
-  }, [])
-
-  // Builds the per-event balance history chart once both the event list
-  // and the model roster (from the lifetime leaderboard) are available.
-  useEffect(() => {
-    if (events.length < 2 || lifetimeLeaderboard.length === 0) {
-      setChartXLabels([])
-      setChartSeries([])
-      return
-    }
-
-    const ordered = [...events].sort((a, b) => {
-      // match_start_time (the real match kickoff) orders these more
-      // accurately than open_time, which is when the Kalshi market opened
-      // for trading and can be days ahead of the actual match.
-      const at = new Date(a.match_start_time ?? a.open_time ?? a.created_at).getTime()
-      const bt = new Date(b.match_start_time ?? b.open_time ?? b.created_at).getTime()
-      return at - bt
-    })
-    const modelNames = lifetimeLeaderboard.map((row) => row.model_name)
-
-    let cancelled = false
-    const fetchHistory = async () => {
-      setLoadingHistory(true)
-      setHistoryError(null)
-      try {
-        const details = await Promise.all(
-          ordered.map((e) =>
-            fetch(`/api/events/detail?event_id=${e.id}`).then((r) => r.json()),
-          ),
-        )
-        if (cancelled) return
-
-        const balances: Record<string, number> = {}
-        const values: Record<string, number[]> = {}
-        modelNames.forEach((m) => {
-          balances[m] = 10
-          values[m] = []
-        })
-
-        details.forEach((d) => {
-          const rows: EventLeaderboardRow[] = d.ok ? d.data.leaderboard : []
-          modelNames.forEach((m) => {
-            const row = rows.find((r) => r.model_name === m)
-            if (row && row.ending_balance !== null) {
-              balances[m] = row.ending_balance
-            }
-            values[m].push(balances[m])
-          })
-        })
-
-        setChartXLabels(ordered.map((e) => truncateLabel(e.event_name)))
-        setChartSeries(
-          modelNames.map((m) => {
-            const { icon, badge } = getModelIcon(m)
-            return { key: m, name: m, badge, badgeIcon: icon, values: values[m] }
-          }),
-        )
-      } catch (err) {
-        if (!cancelled) {
-          setHistoryError(err instanceof Error ? err.message : "Unknown error")
-        }
-      } finally {
-        if (!cancelled) setLoadingHistory(false)
-      }
-    }
-
-    fetchHistory()
-    return () => {
-      cancelled = true
-    }
-  }, [events, lifetimeLeaderboard])
 
   const handleAddEvent = async () => {
     if (!urlInput.trim()) return
     setAdding(true)
     setAddError(null)
     try {
-      const res = await fetch(
-        `/api/kalshi/add-event?url=${encodeURIComponent(urlInput.trim())}&ingest_all_props=true`,
-        { method: "POST" },
-      )
-      const data = await res.json()
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || "Failed to add event")
-      }
+      await addEvent(urlInput.trim())
       setUrlInput("")
-      await fetchEvents()
+      await queryClient.invalidateQueries({ queryKey: ["events"] })
     } catch (err) {
       setAddError(err instanceof Error ? err.message : "Failed to add event")
     } finally {
@@ -318,7 +236,12 @@ function MainScreen() {
     </div>
   )
 
-  const chartLoading = loadingEvents || loadingLifetime || loadingHistory
+  const { xLabels: chartXLabels, series: chartSeries } = buildLeaderboardChart(
+    events,
+    lifetimeLeaderboard,
+    balanceHistory,
+  )
+  const chartLoading = loadingEvents || loadingLifetime || balanceHistoryQuery.isFetching
 
   const left = (
     <div className="flex flex-col gap-10 py-10">

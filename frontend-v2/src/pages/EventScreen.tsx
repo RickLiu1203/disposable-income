@@ -4,11 +4,13 @@ import {
   Button,
   Card,
   Chip,
+  Dropdown,
   LineChart,
   ListRow,
   LlmLogo,
   Modal,
   Skeleton,
+  Sparkline,
   StatTile,
   Toggle,
 } from "../design-system"
@@ -21,10 +23,12 @@ import { getModelIcon } from "../lib/modelIcons"
 import { estimateCurrentValue } from "../lib/predictionValue"
 import { buildValueChart, formatAsOf } from "../lib/valueChart"
 import { cx } from "../lib/cx"
-import type { PredictionRow } from "../types/events"
+import type { MarketSnapshotRow, PredictionRow } from "../types/events"
 
 const CHART_SKELETON_BAR_HEIGHTS = [45, 68, 55, 82, 60, 40, 74, 52, 66, 78]
 const LEFTOVER_SUFFIX = "-LEFTOVER"
+const MARKET_SORTS = ["Default", "Top gainers", "Top losers", "Highest price", "Lowest price"] as const
+type MarketSort = (typeof MARKET_SORTS)[number]
 
 function EventScreen() {
   const { eventId } = useParams<{ eventId: string }>()
@@ -53,7 +57,8 @@ function EventScreen() {
 
   const [rightMode, setRightMode] = useState<"markets" | "model">("markets")
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
-  const [marketsFilter, setMarketsFilter] = useState<"All" | "Predicted">("All")
+  const [predictedSort, setPredictedSort] = useState<MarketSort>("Default")
+  const [allSort, setAllSort] = useState<MarketSort>("Default")
   const [modelTab, setModelTab] = useState<"Predictions" | "Strategies">("Predictions")
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false)
@@ -280,57 +285,194 @@ function EventScreen() {
     if (!list.includes(p.model_name)) list.push(p.model_name)
     predictedByTicker.set(p.market_ticker, list)
   })
-  const visibleMarkets =
-    marketsFilter === "All" ? marketSnapshot : marketSnapshot.filter((m) => predictedByTicker.has(m.ticker))
+  // "Leftover Capital" is a synthetic markets row predictionsPlace.ts writes
+  // to track a model's unstaked bankroll as a virtual prediction (ticker
+  // ends in -LEFTOVER, see LEFTOVER_SUFFIX) -- real bookkeeping, not a
+  // tradeable market, so it never belongs in this market browser.
+  const realMarkets = marketSnapshot.filter((m) => !m.ticker.endsWith(LEFTOVER_SUFFIX))
+  // Two permanent sections instead of a toggle: Predicted markets always
+  // shown first, then every other market below -- "All" now means "all the
+  // rest" so nothing appears twice.
+  const predictedMarkets = realMarkets.filter((m) => predictedByTicker.has(m.ticker))
+  const otherMarkets = realMarkets.filter((m) => !predictedByTicker.has(m.ticker))
+
+  // Gainers/losers/highest/lowest are individual-market rankings, so they
+  // deliberately break out of the prop-family grouping below (a "top
+  // gainer" buried inside a 20-row card isn't findable) -- default sort
+  // keeps the grouped-by-market card view, everything else flattens. Each
+  // section sorts independently (its own dropdown), not holistically.
+  function sortMarkets(markets: MarketSnapshotRow[], sort: MarketSort): MarketSnapshotRow[] {
+    if (sort === "Default") return markets
+    const copy = [...markets]
+    switch (sort) {
+      case "Top gainers":
+        return copy.filter((m) => m.change !== null).sort((a, b) => (b.change ?? 0) - (a.change ?? 0))
+      case "Top losers":
+        return copy.filter((m) => m.change !== null).sort((a, b) => (a.change ?? 0) - (b.change ?? 0))
+      case "Highest price":
+        return copy.filter((m) => m.price !== null).sort((a, b) => (b.price ?? 0) - (a.price ?? 0))
+      case "Lowest price":
+        return copy.filter((m) => m.price !== null).sort((a, b) => (a.price ?? 0) - (b.price ?? 0))
+      default:
+        return copy
+    }
+  }
+
+  // Prop markets under the same sibling event_ticker (e.g. every "Over/Under
+  // N corners" threshold under a single "Total Corners" Kalshi event) are
+  // really variants of one underlying question, so group by event_ticker and
+  // fold every group into a card -- only for the default sort; any ranked
+  // sort is a deliberately flat list (see above).
+  const titleByEventTicker = new Map((eventDetail?.tickers ?? []).map((t) => [t.event_ticker, t.title]))
+  interface MarketGroup {
+    key: string
+    title: string | null
+    markets: MarketSnapshotRow[]
+  }
+  function buildMarketGroups(markets: MarketSnapshotRow[], sort: MarketSort): MarketGroup[] {
+    if (sort === "Default") {
+      const order: string[] = []
+      const groups = new Map<string, MarketSnapshotRow[]>()
+      markets.forEach((m) => {
+        if (!groups.has(m.event_ticker)) {
+          groups.set(m.event_ticker, [])
+          order.push(m.event_ticker)
+        }
+        groups.get(m.event_ticker)!.push(m)
+      })
+      return order.map((key) => ({ key, title: titleByEventTicker.get(key) ?? null, markets: groups.get(key)! }))
+    }
+    return sortMarkets(markets, sort).map((m) => ({ key: m.ticker, title: null, markets: [m] }))
+  }
+
+  const predictedGroups = buildMarketGroups(predictedMarkets, predictedSort)
+  const otherGroups = buildMarketGroups(otherMarkets, allSort)
+
+  // Every market in an event is written by the same live-poller cycle (one
+  // shared timestamp per pass, see valuePoller.ts's fetchLiveSidePrices), so
+  // a per-row "as of" is the same string repeated 50 times -- surface the
+  // freshest one once above both sections instead.
+  const latestAsOf = realMarkets.reduce<string | null>(
+    (latest, m) => (m.as_of && (!latest || m.as_of > latest) ? m.as_of : latest),
+    null,
+  )
+
+  function renderMarketRow(m: MarketSnapshotRow, showPredictedBadges: boolean) {
+    const changeCents = m.change !== null ? Math.round(m.change * 100) : null
+    const positive = (changeCents ?? 0) >= 0
+    const predictedModels = predictedByTicker.get(m.ticker) ?? []
+    // "First" is the earliest priced point this market has in
+    // market_price_history -- almost always from ingestion-time candlestick
+    // backfill (Kalshi's real history back toward market open), not "the
+    // first live poll", since the value poller only starts once a match has
+    // begun. Only shown once there are two priced points to compare.
+    const firstCents = m.history.length > 0 ? Math.round(m.history[0].price * 100) : null
+    const currentCents = m.price !== null ? Math.round(m.price * 100) : null
+    return (
+      <div key={m.ticker} className="flex items-stretch gap-3 border-b border-neutral-100 py-2.5 last:border-b-0">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-neutral-900">{m.label ?? "Market"}</div>
+          <div className="flex items-center gap-1 text-xs text-neutral-500">
+            {changeCents !== null && firstCents !== null && currentCents !== null ? (
+              <>
+                <span>{firstCents}¢</span>
+                <span className={cx("text-[8px]", positive ? "text-success-600" : "text-error-600")}>▶</span>
+                <span className={cx("font-semibold tabular-nums", positive ? "text-success-600" : "text-error-600")}>
+                  {currentCents}¢
+                </span>
+              </>
+            ) : (
+              <span>{currentCents !== null ? `${currentCents}¢` : "—"}</span>
+            )}
+          </div>
+          {showPredictedBadges && predictedModels.length > 0 && (
+            <div className="mt-1.5 flex gap-1">
+              {predictedModels.map((modelName) => {
+                const { icon, badge } = getModelIcon(modelName)
+                return <LlmLogo key={modelName} label={badge} icon={icon} size="sm" />
+              })}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <Sparkline points={m.history.map((h) => h.price)} positive={positive} className="hidden sm:block" />
+          {changeCents !== null && (
+            <Chip variant={positive ? "success" : "error"} className="shrink-0 tabular-nums">
+              {positive ? "▲" : "▼"} {Math.abs(changeCents)}¢
+            </Chip>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  function renderMarketSection(
+    title: string,
+    groups: MarketGroup[],
+    sort: MarketSort,
+    onSortChange: (sort: MarketSort) => void,
+    showPredictedBadges: boolean,
+    emptyText: string,
+  ) {
+    return (
+      <div>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-sm font-medium text-neutral-500">{title}</h3>
+          <Dropdown
+            className="w-40"
+            options={MARKET_SORTS.map((s) => ({ label: s, value: s }))}
+            value={sort}
+            onChange={(v) => onSortChange(v as MarketSort)}
+          />
+        </div>
+        <div className="mt-3">
+          {groups.length === 0 ? (
+            <p className="text-sm text-neutral-500">{emptyText}</p>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {groups.map((group) => (
+                <Card key={group.key} className="p-4">
+                  {group.title && (
+                    <div className="mb-1.5 truncate text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                      {group.title}
+                    </div>
+                  )}
+                  <div>{group.markets.map((m) => renderMarketRow(m, showPredictedBadges))}</div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   const marketsView = (
     <div>
-      <Toggle options={["All", "Predicted"]} value={marketsFilter} onChange={(v) => setMarketsFilter(v as "All" | "Predicted")} />
-      <div className="mt-4">
-        {loadingSnapshot ? (
-          <div className="flex flex-col gap-3">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-10 w-full" />
-            ))}
-          </div>
-        ) : snapshotError ? (
-          <p className="text-sm text-error-700">{snapshotError}</p>
-        ) : visibleMarkets.length === 0 ? (
-          <p className="text-sm text-neutral-500">
-            {marketsFilter === "Predicted" ? "No predictions placed yet." : "No markets found."}
-          </p>
-        ) : (
-          <div>
-            {visibleMarkets.map((m) => (
-              <div key={m.ticker} className="flex items-center justify-between gap-3 border-b border-neutral-100 py-2.5 last:border-b-0">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-neutral-900">{m.label ?? "Market"}</div>
-                  <div className="text-xs text-neutral-500">
-                    {m.price !== null ? `${Math.round(m.price * 100)}¢` : "—"}
-                    {m.as_of && <> &middot; as of {formatAsOf(m.as_of)}</>}
-                  </div>
-                </div>
-                {marketsFilter === "Predicted" && (
-                  <div className="flex -space-x-1.5 shrink-0">
-                    {(predictedByTicker.get(m.ticker) ?? []).map((modelName) => {
-                      const { icon, badge } = getModelIcon(modelName)
-                      return (
-                        <LlmLogo
-                          key={modelName}
-                          label={badge}
-                          icon={icon}
-                          size="sm"
-                          className="ring-2 ring-secondary-50"
-                        />
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {latestAsOf && <p className="text-xs text-neutral-400">As of {formatAsOf(latestAsOf)}</p>}
+      {loadingSnapshot ? (
+        <div className="mt-3 flex flex-col gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      ) : snapshotError ? (
+        <p className="mt-3 text-sm text-error-700">{snapshotError}</p>
+      ) : realMarkets.length === 0 ? (
+        <p className="mt-3 text-sm text-neutral-500">No markets found.</p>
+      ) : (
+        <div className="mt-3 flex flex-col gap-8">
+          {renderMarketSection(
+            "Predicted",
+            predictedGroups,
+            predictedSort,
+            setPredictedSort,
+            true,
+            "No predictions placed yet.",
+          )}
+          {renderMarketSection("All", otherGroups, allSort, setAllSort, false, "No other markets found.")}
+        </div>
+      )}
     </div>
   )
 
@@ -484,14 +626,14 @@ function EventScreen() {
           }}
           className={cx(
             "rounded-lg border-2 border-dashed p-8 text-center",
-            isDragging ? "border-accent-500 bg-accent-50" : "border-neutral-200",
+            isDragging ? "border-secondary-500 bg-secondary-50" : "border-neutral-200",
           )}
         >
           <p className="text-sm text-neutral-600">
             {uploading ? "Uploading..." : "Drop one or more prediction JSON files here"}
           </p>
           <p className="mt-1 text-xs text-neutral-400">or</p>
-          <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-accent-600 hover:text-accent-700">
+          <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-secondary-600 hover:text-secondary-700">
             Browse files
             <input
               type="file"

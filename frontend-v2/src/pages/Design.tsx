@@ -10,6 +10,7 @@ import {
   LlmLogo,
   Modal,
   Skeleton,
+  Sparkline,
   StatTile,
   Toast,
   Toggle,
@@ -331,6 +332,17 @@ function Design() {
                 delta: model.delta,
               }))}
             />
+          </div>
+
+          <div className="mt-6">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              Sparkline
+            </div>
+            <div className="flex items-center gap-6">
+              <Sparkline points={[12, 18, 15, 22, 28, 26, 34]} />
+              <Sparkline points={[34, 30, 31, 24, 20, 18, 12]} />
+              <Sparkline points={[20, 21, 19, 20, 22, 19, 20]} />
+            </div>
           </div>
         </div>
       </section>

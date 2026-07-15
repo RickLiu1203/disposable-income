@@ -2,9 +2,9 @@ import "dotenv/config";
 import express from "express";
 import swaggerUi from "swagger-ui-express";
 import { getExchangeStatus } from "./kalshi/kalshi";
-import { getEventBundle, resolveKalshiMarketUrl, getMilestoneRelatedTickers } from "./kalshi/kalshiEvents";
-import { EventAlreadyIngestedError, ingestKalshiEvent } from "./kalshi/kalshiIngest";
-import { getEventDetail, listEvents, getLifetimeLeaderboard } from "./events/eventsRead";
+import { getEventBundle, resolveKalshiMarketUrl } from "./kalshi/kalshiEvents";
+import { EventAlreadyIngestedError, ingestKalshiEvent, ingestConsolidatedEvent } from "./kalshi/kalshiIngest";
+import { getEventDetail, listEvents, getLifetimeLeaderboard, getBalanceHistory } from "./events/eventsRead";
 import { getMarketSnapshot } from "./events/marketSnapshot";
 import { deleteEvent } from "./events/eventsDelete";
 import { settleEvent, adjustModelEndingBalance } from "./kalshi/kalshiSettle";
@@ -27,6 +27,8 @@ import {
   computeMarketHistory,
   getForecastSummary,
   getMarketDetail,
+  getFrozenMarketTickers,
+  restrictToIngestedMarkets,
 } from "./agent/agentKalshi";
 import { startValuePolling, getValueHistory } from "./agent/valuePoller";
 import { renderSystemPrompt } from "./agent/systemPromptTemplate";
@@ -198,43 +200,13 @@ app.post("/kalshi/add-event", async (req, res) => {
 
   try {
     if (ingestAllProps) {
-      const tickers = await getMilestoneRelatedTickers(seriesTicker, eventTicker);
-      const results: any[] = [];
-      const errors: string[] = [];
-
-      for (const ticker of tickers) {
-        const resolvedSeries = ticker.split("-")[0];
-        try {
-          const result = await ingestKalshiEvent(resolvedSeries, ticker, {
-            startTs,
-            endTs,
-            periodInterval,
-            percentiles,
-          });
-          results.push(result);
-        } catch (error) {
-          // If some sibling is already ingested, that's fine. Ignore 409s.
-          if (error instanceof EventAlreadyIngestedError) {
-            results.push({ event_ticker: ticker, status: "already_ingested" });
-          } else {
-            console.error(`Failed to ingest sibling event ${ticker}:`, error);
-            errors.push(error instanceof Error ? error.message : String(error));
-          }
-        }
-      }
-
-      if (results.length === 0 && errors.length > 0) {
-        throw new Error(`Failed to ingest any match events: ${errors.join("; ")}`);
-      }
-
-      res.json({
-        ok: true,
-        event_ticker: eventTicker,
-        series_ticker: seriesTicker,
-        ingested_count: results.length,
-        results,
-        partial_errors: errors.length > 0 ? errors : undefined,
+      const data = await ingestConsolidatedEvent(seriesTicker, eventTicker, {
+        startTs,
+        endTs,
+        periodInterval,
+        percentiles,
       });
+      res.json({ ok: true, ...data });
       return;
     }
 
@@ -298,6 +270,18 @@ app.delete("/events", async (req, res) => {
 app.get("/events/lifetime-leaderboard", async (_req, res) => {
   try {
     const data = await getLifetimeLeaderboard();
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+app.get("/events/balance-history", async (_req, res) => {
+  try {
+    const data = await getBalanceHistory();
     res.json({ ok: true, data });
   } catch (error) {
     res.status(502).json({
@@ -552,7 +536,13 @@ app.get("/agent/markets", async (req, res) => {
   try {
     const siblings = await getEventSiblings(eventId);
     const siblingBundles = await fetchSiblingBundles(siblings);
-    const selection = buildMarketSelection(siblingBundles);
+    // core_markets/top_prop_markets are restricted to the ticker set frozen
+    // at ingestion (see kalshiIngest.ts) -- the agent can only pick from the
+    // same markets the sidebar shows. expand_ticker deliberately bypasses
+    // this and stays unbounded, per its own doc contract.
+    const allowedTickers = await getFrozenMarketTickers(eventId);
+    const restrictedBundles = restrictToIngestedMarkets(siblingBundles, allowedTickers);
+    const selection = buildMarketSelection(restrictedBundles);
     const expanded = typeof expandTicker === "string" ? findExpandedSibling(siblingBundles, expandTicker) : null;
     res.json({
       ok: true,
@@ -584,8 +574,10 @@ app.get("/agent/history", async (req, res) => {
       endTs: nowSec,
       periodInterval: 60,
     });
-    const selection = buildMarketSelection(siblingBundles);
-    const markets = computeMarketHistory(siblingBundles, selection);
+    const allowedTickers = await getFrozenMarketTickers(eventId);
+    const restrictedBundles = restrictToIngestedMarkets(siblingBundles, allowedTickers);
+    const selection = buildMarketSelection(restrictedBundles);
+    const markets = computeMarketHistory(restrictedBundles, selection);
     res.json({ ok: true, data: { window_hours: windowHours, markets } });
   } catch (error) {
     res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "Unknown error" });

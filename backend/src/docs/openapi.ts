@@ -313,7 +313,7 @@ export const openapiSpec = {
             required: false,
             schema: { type: "boolean" },
             description:
-              "If true, resolves the sports match milestone and automatically ingests all related sibling event tickers (moneyline, spread, totals, correct score, etc.) in a single call.",
+              "If true, resolves the sports match milestone and automatically ingests all related sibling event tickers (moneyline, spread, totals, correct score, etc.) in a single call. In either mode, markets are capped once at ingestion via the same core+top-props-by-volume selection GET /agent/markets computes live (core siblings kept in full, non-core props pooled and capped to a floor of 50 total) -- only the selected markets are written, so GET /events/market-snapshot and the agent pipeline read the same frozen set. Not re-evaluated after ingestion.",
           },
         ],
         responses: {
@@ -718,11 +718,58 @@ export const openapiSpec = {
         },
       },
     },
+    "/events/balance-history": {
+      get: {
+        summary: "Flat per-event, per-model ending balance for every settled match, for the MainScreen leaderboard chart",
+        description:
+          "One cheap query straight against model_event_results (event_id, model_name, ending_balance), no per-event fan-out. Exists to replace the N+1 pattern of calling GET /events/detail once per event just to read each response's leaderboard.ending_balance out of an otherwise-unused full markets/predictions/price-history bundle -- that pattern was slow (N heavy fetches) and, under React StrictMode's double-invoked effects, could leave the frontend's loading state stuck. Callers group rows by event_id client-side after already having the ordered event list from GET /events.",
+        responses: {
+          "200": {
+            description: "Balance history retrieved successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          event_id: { type: "string" },
+                          model_name: { type: "string" },
+                          ending_balance: { type: "number", nullable: true },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/events/market-snapshot": {
       get: {
         summary: "Volume-sorted live-ish price snapshot of every market in an event, for the EventScreen Markets panel",
         description:
-          "For each market in the event, prefers the latest market_price_history row if one exists (is_live_priced: true, as_of = that row's period_end_ts), else falls back to the ingestion-time markets row (is_live_priced: false, as_of = ingestion time). Note market_price_history is written by both ingestion-time candlestick backfill and the live value poller (valuePoller.ts) -- is_live_priced doesn't strictly mean 'from the last 10 minutes', it means 'has a real timestamped price point'. Render as_of directly rather than inferring freshness from is_live_priced alone. Sorted by resolved volume descending, server-side. Only market label is meant to be shown to end users -- ticker/event_ticker are included for internal lookups only.",
+          "For each market in the event, prefers the latest market_price_history row if one exists (is_live_priced: true, as_of = that row's period_end_ts), else falls back to the ingestion-time markets row (is_live_priced: false, as_of = ingestion time). Note market_price_history is written by both ingestion-time candlestick backfill and the live value poller (valuePoller.ts) -- is_live_priced doesn't strictly mean 'from the last 5 minutes', it means 'has a real timestamped price point'. Render as_of directly rather than inferring freshness from is_live_priced alone. 'Every market in the event' means every row in the markets table for it -- for events ingested after the ingestion-time cap was added (see POST /kalshi/add-event), that's already the frozen core+top-50-props selection, not Kalshi's full market list; this endpoint does no additional filtering of its own. Sorted by resolved volume descending, server-side. Also returns `history` (the market's full priced market_price_history series, ascending, {price, as_of} per point -- backs a per-market sparkline; no new polling needed, this just reads the series the value poller was already writing) and `change` (last history price minus first, null with fewer than two priced points -- backs gainers/losers/highest/lowest sorting client-side). Only market label is meant to be shown to end users -- ticker/event_ticker are included for internal lookups only.",
         parameters: [
           {
             name: "event_id",
@@ -757,6 +804,14 @@ export const openapiSpec = {
                               volume: { type: "number", nullable: true },
                               as_of: { type: "string", nullable: true },
                               is_live_priced: { type: "boolean" },
+                              history: {
+                                type: "array",
+                                items: {
+                                  type: "object",
+                                  properties: { price: { type: "number" }, as_of: { type: "string" } },
+                                },
+                              },
+                              change: { type: "number", nullable: true },
                             },
                           },
                         },
@@ -1214,7 +1269,7 @@ export const openapiSpec = {
       get: {
         summary: "Agent pipeline step 4: fetch this event's live markets, bounded to core markets + top props by volume",
         description:
-          "Live-fetches every sibling event ticker (from event_tickers) in parallel from Kalshi (never the DB's ingestion-time snapshot). Splits markets into core_markets (always included in full, per CORE_SERIES_SUFFIXES_BY_PREFIX in agentMarketConfig.ts) and top_prop_markets (pooled across all non-core siblings, highest volume first). Never limits total visible markets below a floor of 50: props_limit = max(30, 50 - core_markets.length). Anything past that floor is summarized in 'omitted' (per-sibling omitted_count + total_volume), never silently dropped. Pass expand_ticker for the full unbounded market list of one specific sibling.",
+          "Live-fetches every sibling event ticker (from event_tickers) from Kalshi for fresh prices, then restricts each sibling's markets down to the ticker set frozen at ingestion (every ticker in the markets table for this event_id -- see POST /kalshi/add-event) before splitting into core_markets (always included in full, per CORE_SERIES_SUFFIXES_BY_PREFIX in agentMarketConfig.ts) and top_prop_markets (pooled across all non-core siblings, highest volume first). The agent can only ever pick from this frozen set, matching what GET /events/market-snapshot shows -- for events ingested after the cap was added the set is already <= core + 50 props, so 'omitted' is normally empty. Pass expand_ticker to bypass the frozen-set restriction and get the full unbounded live market list of one specific sibling.",
         parameters: [
           { name: "event_id", in: "query", required: true, schema: { type: "string", format: "uuid" } },
           { name: "expand_ticker", in: "query", required: false, schema: { type: "string" }, description: "One sibling event_ticker to return the full (unbounded) market list for." },
@@ -1389,7 +1444,7 @@ export const openapiSpec = {
       get: {
         summary: "Live mark-to-market bankroll history per model for one event, over time",
         description:
-          "Reads the persisted output of the server-side value poller (backend/src/agent/valuePoller.ts): every 10 minutes, for each event that has started (Kalshi-sourced match_start_time, the real match kickoff -- not open_time, which is when Kalshi opened the market for trading and is routinely days earlier), has at least one prediction placed, and still has a pending prediction, the poller live-fetches Kalshi and writes each model's current mark-to-market bankroll for that event to model_event_value_snapshots. This endpoint is a pure DB read of that history (one series per model, ordered by snapshot_ts) -- it never calls Kalshi itself, so it's safe to poll from the frontend as often as needed. Distinct from GET /events/detail's leaderboard, which only has the one final ending_balance written at settlement; this has the whole path to get there. Returns an empty array for an event with no bets yet, or one that hasn't started, or one that's already fully settled (the poller only writes new points for events currently live).",
+          "Reads the persisted output of the server-side value poller (backend/src/agent/valuePoller.ts): every 5 minutes, for each event that has started (Kalshi-sourced match_start_time, the real match kickoff -- not open_time, which is when Kalshi opened the market for trading and is routinely days earlier), has at least one prediction placed, and still has a pending prediction, the poller live-fetches Kalshi and writes each model's current mark-to-market bankroll for that event to model_event_value_snapshots. This endpoint is a pure DB read of that history (one series per model, ordered by snapshot_ts) -- it never calls Kalshi itself, so it's safe to poll from the frontend as often as needed. Distinct from GET /events/detail's leaderboard, which only has the one final ending_balance written at settlement; this has the whole path to get there. Returns an empty array for an event with no bets yet, or one that hasn't started, or one that's already fully settled (the poller only writes new points for events currently live).",
         parameters: [
           {
             name: "event_id",

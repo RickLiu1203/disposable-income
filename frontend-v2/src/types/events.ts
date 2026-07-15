@@ -58,16 +58,48 @@ export interface EventDetail {
   starting_balances: Record<string, number>
 }
 
+export interface MarketHistoryPoint {
+  price: number
+  as_of: string
+}
+
 export interface MarketSnapshotRow {
   ticker: string
+  event_ticker: string
   label: string | null
   price: number | null
   volume: number | null
   as_of: string | null
+  history: MarketHistoryPoint[]
+  change: number | null
 }
 
 export interface LifetimeRosterRow {
   model_name: string
+  events_participated: number
+  avg_percent_change: number
+  total_pnl: number
+  total_rewards_earned: number
+  lifetime_rank: number
+}
+
+export interface EventListRow {
+  id: string
+  event_name: string
+  sub_title: string | null
+  competition: string | null
+  competition_scope: string | null
+  live_status: LiveEventStatus
+  market_count: number
+  open_time: string | null
+  match_start_time: string | null
+  created_at: string
+}
+
+export interface BalanceHistoryRow {
+  event_id: string
+  model_name: string
+  ending_balance: number | null
 }
 
 export interface ValueHistoryPoint {

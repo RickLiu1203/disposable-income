@@ -5,7 +5,7 @@ import { settleEvent } from "../kalshi/kalshiSettle";
 import { getEventStartingBalances } from "../events/startingBalances";
 
 // ---------------------------------------------------------------------------
-// Server-side live-value poller. Every 10 minutes: find events that have
+// Server-side live-value poller. Every 5 minutes: find events that have
 // started (per Kalshi-sourced match_start_time, the real match kickoff --
 // NOT open_time, which is when Kalshi opened the market for trading and is
 // routinely days earlier), have at least one prediction placed, and still
@@ -32,8 +32,8 @@ import { getEventStartingBalances } from "../events/startingBalances";
 // reason to reintroduce that risk for a background job.
 // ---------------------------------------------------------------------------
 
-const POLL_INTERVAL_MS = 10 * 60 * 1000;
-const SNAPSHOT_PERIOD_INTERVAL_MINUTES = 10;
+const POLL_INTERVAL_MS = 5 * 60 * 1000;
+const SNAPSHOT_PERIOD_INTERVAL_MINUTES = 5;
 
 // Last unrealized_balance written per "model:event", so a value that hasn't
 // moved since the previous cycle never triggers a redundant row. Reset on
@@ -274,7 +274,7 @@ async function runPollCycle(): Promise<void> {
 let pollTimer: NodeJS.Timeout | null = null;
 
 /** Starts the server-side live-value poller. Call once at server boot. Runs
- * one cycle immediately, then every 10 minutes thereafter, for as long as
+ * one cycle immediately, then every 5 minutes thereafter, for as long as
  * the server process is alive. */
 export function startValuePolling(): void {
   if (pollTimer) return;

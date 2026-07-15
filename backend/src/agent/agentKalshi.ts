@@ -99,6 +99,38 @@ export async function fetchSiblingBundles(
   return results;
 }
 
+/** The frozen ticker set an event was capped to at ingestion time (see
+ * buildMarketSelection() usage in kalshiIngest.ts) -- i.e. every ticker
+ * currently in the `markets` table for this event_id. Reading directly from
+ * `markets` rather than recomputing a selection here is what makes this the
+ * single source of truth shared with the frontend sidebar
+ * (GET /events/market-snapshot is a plain unfiltered read of the same
+ * table): both read exactly the same ticker universe, one written once at
+ * ingestion, never independently re-derived. */
+export async function getFrozenMarketTickers(eventId: string): Promise<Set<string>> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.from("markets").select("ticker").eq("event_id", eventId);
+  if (error) {
+    throw new Error(`Failed to load ingested market tickers for event ${eventId}: ${error.message}`);
+  }
+  return new Set((data ?? []).map((m) => m.ticker as string));
+}
+
+/** Restricts each sibling's live-fetched market list (and price history) to
+ * the frozen ingestion-time ticker set, so the agent pipeline can only ever
+ * pick from the same markets the sidebar shows -- prices/candlesticks stay
+ * live from Kalshi, only the universe of eligible tickers is frozen. */
+export function restrictToIngestedMarkets(siblingBundles: SiblingBundle[], allowedTickers: Set<string>): SiblingBundle[] {
+  return siblingBundles.map((s) => ({
+    ...s,
+    bundle: {
+      ...s.bundle,
+      markets: s.bundle.markets.filter((m) => allowedTickers.has(m.ticker)),
+      priceHistory: s.bundle.priceHistory?.filter((series) => allowedTickers.has(series.market_ticker)),
+    },
+  }));
+}
+
 function toAgentMarkets(sibling: SiblingBundle): AgentMarket[] {
   return sibling.bundle.markets.map((m) => ({
     ...m,
