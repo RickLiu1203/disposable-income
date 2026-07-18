@@ -121,6 +121,8 @@ interface PredictionRow {
   payout: number | null;
   placed_at: string;
   settled_at: string | null;
+  live_value: number | null;
+  live_value_as_of: string | null;
 }
 
 interface StrategyRow {
@@ -272,7 +274,7 @@ export async function getEventDetail(eventId: string): Promise<EventDetail | nul
   // Load per-model predictions (bets placed) for this consolidated event
   const { data: predictionRows, error: predictionsError } = await supabase
     .from("predictions")
-    .select("id, model_name, market_ticker, event_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at")
+    .select("id, model_name, market_ticker, event_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at, live_value, live_value_as_of")
     .eq("event_id", eventId)
     .order("model_name", { ascending: true })
     .order("placed_at", { ascending: true });

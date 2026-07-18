@@ -15,6 +15,8 @@ import {
   Toast,
   Toggle,
 } from "../design-system";
+import { deltaColor } from "../lib/deltaColor";
+import { cx } from "../lib/cx";
 
 const typeScale = [
   { token: "text-2xl", sample: "Match summary" },
@@ -182,13 +184,7 @@ function Design() {
                   subtitle={
                     <>
                       {model.balance} &middot;{" "}
-                      <span
-                        className={
-                          model.positive
-                            ? "font-semibold text-success-600"
-                            : "font-semibold text-error-600"
-                        }
-                      >
+                      <span className={cx("font-semibold", deltaColor(model.positive))}>
                         {model.delta}
                       </span>
                     </>

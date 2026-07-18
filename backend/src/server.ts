@@ -7,6 +7,7 @@ import { EventAlreadyIngestedError, ingestKalshiEvent, ingestConsolidatedEvent }
 import { getEventDetail, listEvents, getLifetimeLeaderboard, getBalanceHistory } from "./events/eventsRead";
 import { getMarketSnapshot } from "./events/marketSnapshot";
 import { deleteEvent } from "./events/eventsDelete";
+import { updateMatchStartTime } from "./events/eventsUpdate";
 import { settleEvent, adjustModelEndingBalance } from "./kalshi/kalshiSettle";
 import { getServerTime } from "./polymarket/polymarket";
 import { pingSupabase, getSupabaseClient } from "./supabase/supabaseClient";
@@ -257,6 +258,38 @@ app.delete("/events", async (req, res) => {
     res.json({ ok: true, data });
   } catch (error) {
     if (error instanceof Error && (error.message.includes("not found") || error.message.includes("not exist"))) {
+      res.status(404).json({ ok: false, error: error.message });
+      return;
+    }
+    res.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+app.patch("/events/match-start-time", async (req, res) => {
+  const eventId = req.query.event_id;
+  const matchStartTime = req.body?.match_start_time;
+
+  if (typeof eventId !== "string") {
+    res.status(400).json({ ok: false, error: "Query param 'event_id' is required" });
+    return;
+  }
+  if (typeof matchStartTime !== "string") {
+    res.status(400).json({ ok: false, error: "Body must include 'match_start_time' (ISO 8601 string)" });
+    return;
+  }
+
+  try {
+    const data = await updateMatchStartTime(eventId, matchStartTime);
+    res.json({ ok: true, data });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Invalid match_start_time")) {
+      res.status(400).json({ ok: false, error: error.message });
+      return;
+    }
+    if (error instanceof Error && error.message.startsWith("Event not found")) {
       res.status(404).json({ ok: false, error: error.message });
       return;
     }

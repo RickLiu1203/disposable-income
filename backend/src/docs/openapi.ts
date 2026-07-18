@@ -561,6 +561,104 @@ export const openapiSpec = {
         },
       },
     },
+    "/events/match-start-time": {
+      patch: {
+        summary: "Correct one event's match_start_time (the real-world kickoff), for when Kalshi's sourced value is wrong",
+        description:
+          "Overwrites events.match_start_time with a caller-supplied ISO 8601 timestamp. This is the one column the value poller's gating query and computeEventStatus both trust for 'has this event actually started' (see the 'Match start vs. market open' note in CLAUDE.md) -- correcting it here immediately makes the event eligible for the next live-poll cycle (within 5 minutes) if the new time is in the past and the event has a pending prediction, without needing to re-ingest.",
+        parameters: [
+          {
+            name: "event_id",
+            in: "query",
+            required: true,
+            schema: { type: "string" },
+            description: "UUID of the consolidated parent event to correct.",
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["match_start_time"],
+                properties: {
+                  match_start_time: {
+                    type: "string",
+                    description: "New real-world kickoff time, any format the JS Date constructor accepts (ISO 8601 recommended). Stored normalized to ISO 8601 UTC.",
+                    example: "2026-07-15T19:00:00.000Z",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "match_start_time updated successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: true },
+                    data: {
+                      type: "object",
+                      properties: {
+                        event_id: { type: "string" },
+                        match_start_time: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Missing 'event_id' query param, missing 'match_start_time' body field, or an unparseable timestamp",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "No event found for the given event_id",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "502": {
+            description: "Supabase request failed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean", example: false },
+                    error: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/events/detail": {
       get: {
         summary: "Full detail for one ingested event (event + markets + price history + forecast + related events)",
@@ -600,7 +698,7 @@ export const openapiSpec = {
                           type: "array",
                           items: { type: "object" },
                           description:
-                            "Every model prediction placed against this consolidated event: model_name, market_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at.",
+                            "Every model prediction placed against this consolidated event: model_name, market_ticker, side, stake, entry_price, justification, outcome, payout, placed_at, settled_at, live_value, live_value_as_of. live_value is the poller's live mark-to-market dollar value for a still-pending prediction (same number, same cycle, as what feeds that model's model_event_value_snapshots row) -- null until the poller has run at least once for this event. Once outcome is no longer 'pending', prefer payout (the real, final number) over live_value, which simply stops updating.",
                         },
                         strategies: {
                           type: "array",

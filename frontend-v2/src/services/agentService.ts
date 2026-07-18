@@ -6,9 +6,17 @@ export async function getValueHistory(eventId: string): Promise<ValueHistorySeri
   return res.data
 }
 
-export async function getSystemPrompt(eventId: string, modelName: string): Promise<string> {
+export async function getSystemPrompt(
+  eventId: string,
+  modelName: string,
+  backendBaseUrl?: string,
+): Promise<string> {
+  const params = new URLSearchParams({ event_id: eventId, model_name: modelName })
+  if (backendBaseUrl?.trim()) {
+    params.set("backend_base_url", backendBaseUrl.trim())
+  }
   const res = await apiRequest<{ data: { prompt: string } }>(
-    `/api/agent/system-prompt?event_id=${eventId}&model_name=${encodeURIComponent(modelName)}`,
+    `/api/agent/system-prompt?${params.toString()}`,
   )
   return res.data.prompt
 }

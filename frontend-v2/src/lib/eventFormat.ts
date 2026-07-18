@@ -7,8 +7,8 @@ export function outcomeChipVariant(outcome: PredictionRow["outcome"]): "success"
   return "neutral"
 }
 
-export function statusChipVariant(status: LiveEventStatus): "neutral" | "primary" | "secondary" {
-  if (status === "in_progress") return "primary"
+export function statusChipVariant(status: LiveEventStatus): "neutral" | "success" | "secondary" {
+  if (status === "in_progress") return "success"
   if (status === "completed") return "secondary"
   return "neutral"
 }
@@ -34,4 +34,14 @@ export function formatMatchDate(matchStartTime: string | null, openTime: string 
     hour: "numeric",
     minute: "2-digit",
   })
+}
+
+/** Renders an ISO timestamp as a `<input type="datetime-local">` value in
+ * the browser's local time zone, so editing a match start time reads as the
+ * same wall-clock time formatMatchDate above shows -- not UTC. */
+export function toDatetimeLocalValue(iso: string | null): string {
+  if (!iso) return ""
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }

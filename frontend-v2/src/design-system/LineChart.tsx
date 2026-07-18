@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type { MouseEvent as ReactMouseEvent, PointerEvent } from "react"
 import { cx } from "../lib/cx"
+import { deltaColor } from "../lib/deltaColor"
 import { smoothPath } from "../lib/smoothPath"
 
 export interface LineChartSeries {
@@ -207,7 +208,7 @@ export function LineChart({
         {series.map((s, i) => {
           const isSelected = selected?.series === i
           const positive = isSeriesPositive(s)
-          const trendText = positive ? "text-success-700" : "text-error-700"
+          const trendText = deltaColor(positive, 700)
           const trendBg = positive ? "bg-success-50" : "bg-error-50"
           const trendChip = positive ? "bg-success-600 text-white" : "bg-error-600 text-white"
           return (
@@ -381,7 +382,7 @@ export function LineChart({
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5">
                   <span className="font-bold tabular-nums">{valueFormat(s.values[selected.idx])}</span>
-                  <span className={cx("font-semibold", positive ? "text-success-600" : "text-error-600")}>
+                  <span className={cx("font-semibold", deltaColor(positive))}>
                     {positive ? "▲" : "▼"} {seriesDeltaText(s)}
                   </span>
                 </div>

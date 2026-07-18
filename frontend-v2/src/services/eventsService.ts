@@ -34,3 +34,16 @@ export async function getBalanceHistory(): Promise<BalanceHistoryRow[]> {
 export async function addEvent(url: string): Promise<void> {
   await apiRequest(`/api/kalshi/add-event?url=${encodeURIComponent(url)}&ingest_all_props=true`, { method: "POST" })
 }
+
+/** Corrects match_start_time after ingestion -- this is the one field the
+ * value poller and computeEventStatus trust for "has this event actually
+ * started" (see CLAUDE.md's "Match start vs. market open" note), so fixing
+ * a wrong value here is what actually makes live polling/settlement kick in,
+ * not just a cosmetic date fix. */
+export async function updateMatchStartTime(eventId: string, matchStartTimeIso: string): Promise<void> {
+  await apiRequest(`/api/events/match-start-time?event_id=${eventId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ match_start_time: matchStartTimeIso }),
+  })
+}

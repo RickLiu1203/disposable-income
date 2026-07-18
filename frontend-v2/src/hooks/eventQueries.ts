@@ -10,11 +10,17 @@ export function useEventDetailQuery(eventId: string | undefined) {
   })
 }
 
-export function useMarketSnapshotQuery(eventId: string | undefined) {
+/** Polls on the same 60s cadence as useValueHistoryQuery while the match is
+ * in progress, so the live prices backing a per-prediction $ estimate stay
+ * as fresh as the model-list/chart values computed from value snapshots --
+ * otherwise this query only ever fetches once on mount and silently drifts
+ * behind the poller-driven numbers shown elsewhere on the same screen. */
+export function useMarketSnapshotQuery(eventId: string | undefined, liveStatus?: string) {
   return useQuery({
     queryKey: ["marketSnapshot", eventId],
     queryFn: () => getMarketSnapshot(eventId!),
     enabled: !!eventId,
+    refetchInterval: liveStatus === "in_progress" ? 60_000 : false,
   })
 }
 

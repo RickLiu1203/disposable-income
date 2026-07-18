@@ -1,6 +1,6 @@
 import { getSupabaseClient } from "../supabase/supabaseClient";
 import { getEvent, parseNum, type KalshiMarket } from "../kalshi/kalshiEvents";
-import { getEventSiblings, type SiblingTicker } from "./agentKalshi";
+import { getEventSiblings, getFrozenMarketTickers, type SiblingTicker } from "./agentKalshi";
 import { settleEvent } from "../kalshi/kalshiSettle";
 import { getEventStartingBalances } from "../events/startingBalances";
 
@@ -43,6 +43,7 @@ const SNAPSHOT_PERIOD_INTERVAL_MINUTES = 5;
 const lastWritten = new Map<string, number>();
 
 interface PredictionRow {
+  id: number;
   model_name: string;
   market_ticker: string;
   side: "yes" | "no";
@@ -106,6 +107,19 @@ async function fetchLiveSidePrices(eventId: string, siblings: SiblingTicker[]): 
     open_interest: number | null;
   }> = [];
 
+  // market_price_history.market_ticker has a FK to markets(ticker), and a
+  // sibling's live getEvent() response routinely includes far more markets
+  // (e.g. every player x goal-threshold prop) than the core+top-50 subset
+  // actually written to `markets` at ingestion (see "Markets are capped at
+  // ingestion" in CLAUDE.md). Writing a row for a ticker outside that frozen
+  // set violates the FK -- and since this is one batch upsert, that single
+  // bad row silently fails the price write for every OTHER market in the
+  // event too, every cycle, forever. prices (used for the mark-to-market
+  // balance calc below) stays unrestricted since a prediction's own ticker
+  // is always in the frozen set anyway; only what gets persisted here needs
+  // filtering.
+  const frozenTickers = await getFrozenMarketTickers(eventId);
+
   for (const sibling of siblings) {
     let markets: KalshiMarket[];
     try {
@@ -120,6 +134,7 @@ async function fetchLiveSidePrices(eventId: string, siblings: SiblingTicker[]): 
     for (const m of markets) {
       const yesPrice = parseNum(m.last_price_dollars);
       prices.set(m.ticker, yesPrice);
+      if (!frozenTickers.has(m.ticker)) continue;
       marketRows.push({
         market_ticker: m.ticker,
         event_id: eventId,
@@ -197,7 +212,7 @@ async function pollEvent(eventId: string): Promise<void> {
 
   const { data: predictionRows, error: predictionsError } = await supabase
     .from("predictions")
-    .select("model_name, market_ticker, side, stake, entry_price, outcome, payout")
+    .select("id, model_name, market_ticker, side, stake, entry_price, outcome, payout")
     .eq("event_id", eventId);
   if (predictionsError) {
     throw new Error(`Failed to load predictions for event ${eventId}: ${predictionsError.message}`);
@@ -225,6 +240,18 @@ async function pollEvent(eventId: string): Promise<void> {
     unrealized_balance: number;
   }> = [];
 
+  // Same currentValue() call the aggregate sum below uses, just kept
+  // per-prediction so it can be persisted onto each row -- this is what lets
+  // the frontend's per-bet display read the exact number that fed the
+  // model's unrealized_balance, instead of re-deriving its own estimate
+  // from a separately-fetched (and potentially staler) market price.
+  const predictionUpdates: Array<{ id: number; live_value: number }> = [];
+  for (const p of predictions) {
+    if (p.outcome !== "pending") continue;
+    const rounded = Math.round(currentValue(p, livePrices) * 100) / 100;
+    predictionUpdates.push({ id: p.id, live_value: rounded });
+  }
+
   for (const modelName of modelNames) {
     const modelPredictions = byModel.get(modelName)!;
     const startingBalance = startingBalances.get(modelName) ?? 10;
@@ -245,6 +272,22 @@ async function pollEvent(eventId: string): Promise<void> {
     if (error) {
       console.error(`[valuePoller] Failed to insert value snapshots for event ${eventId}:`, error.message);
     }
+  }
+
+  if (predictionUpdates.length > 0) {
+    await Promise.all(
+      predictionUpdates.map(({ id, live_value }) =>
+        supabase
+          .from("predictions")
+          .update({ live_value, live_value_as_of: nowIso })
+          .eq("id", id)
+          .then(({ error }) => {
+            if (error) {
+              console.error(`[valuePoller] Failed to write live_value for prediction ${id}:`, error.message);
+            }
+          }),
+      ),
+    );
   }
 
   await attemptSettlement(eventId, siblings);

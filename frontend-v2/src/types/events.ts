@@ -21,6 +21,8 @@ export interface PredictionRow {
   justification: string
   outcome: "pending" | "win" | "loss" | "void"
   payout: number | null
+  live_value: number | null
+  live_value_as_of: string | null
 }
 
 export interface LeaderboardRow {

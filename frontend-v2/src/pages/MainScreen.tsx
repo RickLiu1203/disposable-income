@@ -14,12 +14,14 @@ import {
 import type { LineChartSeries } from "../design-system"
 import { PanelLayout } from "../layouts/PanelLayout"
 import { getModelIcon } from "../lib/modelIcons"
+import { deltaColor } from "../lib/deltaColor"
+import { cx } from "../lib/cx"
 import { useBalanceHistoryQuery, useEventsQuery, useLifetimeRosterQuery } from "../hooks/eventQueries"
 import { addEvent } from "../services/eventsService"
 import type { BalanceHistoryRow, EventListRow, LifetimeRosterRow, LiveEventStatus } from "../types/events"
 
-function statusChipVariant(status: LiveEventStatus): "neutral" | "primary" | "secondary" {
-  if (status === "in_progress") return "primary"
+function statusChipVariant(status: LiveEventStatus): "neutral" | "success" | "secondary" {
+  if (status === "in_progress") return "success"
   if (status === "completed") return "secondary"
   return "neutral"
 }
@@ -205,7 +207,13 @@ function MainScreen() {
                       </div>
                     )}
                   </div>
-                  <Chip variant={statusChipVariant(evt.live_status)}>
+                  <Chip variant={statusChipVariant(evt.live_status)} className="gap-1.5">
+                    {evt.live_status === "in_progress" && (
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-600 opacity-75" />
+                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success-600" />
+                      </span>
+                    )}
                     {statusLabel(evt.live_status)}
                   </Chip>
                 </div>
@@ -311,13 +319,7 @@ function MainScreen() {
                     <>
                       {row.events_participated} match
                       {row.events_participated !== 1 ? "es" : ""} &middot;{" "}
-                      <span
-                        className={
-                          positive
-                            ? "font-semibold text-success-600"
-                            : "font-semibold text-error-600"
-                        }
-                      >
+                      <span className={cx("font-semibold", deltaColor(positive))}>
                         {positive ? "+" : ""}
                         {row.avg_percent_change.toFixed(1)}%
                       </span>
