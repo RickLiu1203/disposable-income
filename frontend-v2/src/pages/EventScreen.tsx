@@ -9,17 +9,12 @@ import {
   LineChart,
   ListRow,
   LlmLogo,
-  Modal,
   Skeleton,
   Sparkline,
   Toggle,
 } from "../design-system";
 import { EventHeader } from "../components/EventHeader";
-import {
-  DEFAULT_BACKEND_URL,
-  useCopySystemPrompt,
-  useSubmitPredictionFiles,
-} from "../hooks/eventMutations";
+import { DEFAULT_BACKEND_URL, useCopySystemPrompt } from "../hooks/eventMutations";
 import {
   useEventDetailQuery,
   useLifetimeRosterQuery,
@@ -74,8 +69,6 @@ function EventScreen() {
   const valueHistory = valueHistoryQuery.data ?? [];
   const loadingHistory = valueHistoryQuery.isFetching;
 
-  const { uploading, uploadResults, submitFiles } =
-    useSubmitPredictionFiles(eventId);
   const { copyStatus, copySystemPrompt } = useCopySystemPrompt(eventId);
 
   const [rightMode, setRightMode] = useState<"markets" | "model">("markets");
@@ -86,8 +79,6 @@ function EventScreen() {
     "Predictions",
   );
 
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
   const [backendUrl, setBackendUrl] = useState("");
 
   const modelRoster =
@@ -345,15 +336,6 @@ function EventScreen() {
           </div>
         )}
       </div>
-
-      <Card className="cursor-pointer" onClick={() => setUploadModalOpen(true)}>
-        <div className="text-sm font-semibold text-neutral-900">
-          Submit predictions
-        </div>
-        <div className="mt-0.5 text-xs text-neutral-500">
-          Drag and drop JSON files for any model
-        </div>
-      </Card>
     </div>
   );
 
@@ -936,83 +918,12 @@ function EventScreen() {
   );
 
   return (
-    <>
-      <PanelLayout
-        header={header}
-        rightTitle={rightTitle}
-        left={left}
-        right={right}
-      />
-
-      <Modal
-        open={uploadModalOpen}
-        onClose={() => setUploadModalOpen(false)}
-        title="Submit predictions"
-      >
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragging(false);
-            if (e.dataTransfer.files.length > 0)
-              submitFiles(e.dataTransfer.files);
-          }}
-          className={cx(
-            "rounded-lg border-2 border-dashed p-8 text-center",
-            isDragging
-              ? "border-secondary-500 bg-secondary-50"
-              : "border-neutral-200",
-          )}
-        >
-          <p className="text-sm text-neutral-600">
-            {uploading
-              ? "Uploading..."
-              : "Drop one or more prediction JSON files here"}
-          </p>
-          <p className="mt-1 text-xs text-neutral-400">or</p>
-          <label className="mt-2 inline-block cursor-pointer text-sm font-medium text-secondary-600 hover:text-secondary-700">
-            Browse files
-            <input
-              type="file"
-              accept=".json,application/json"
-              multiple
-              disabled={uploading}
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files && e.target.files.length > 0)
-                  submitFiles(e.target.files);
-                e.target.value = "";
-              }}
-            />
-          </label>
-        </div>
-
-        {uploadResults.length > 0 && (
-          <div className="mt-4 max-h-48 overflow-y-auto">
-            {uploadResults.map((r, i) => (
-              <div
-                key={i}
-                className="flex items-start gap-2 border-b border-neutral-100 py-2 last:border-b-0"
-              >
-                <Chip variant={r.status === "success" ? "success" : "error"}>
-                  {r.status}
-                </Chip>
-                <div className="min-w-0">
-                  <div className="truncate text-xs font-medium text-neutral-900">
-                    {r.fileName}
-                  </div>
-                  <div className="text-xs text-neutral-500">{r.message}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Modal>
-    </>
+    <PanelLayout
+      header={header}
+      rightTitle={rightTitle}
+      left={left}
+      right={right}
+    />
   );
 }
 

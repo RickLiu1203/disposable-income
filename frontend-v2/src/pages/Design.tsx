@@ -305,9 +305,9 @@ function Design() {
             <Button variant="secondary" onClick={() => setModalOpen(true)}>
               Open modal
             </Button>
-            <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Submit predictions">
+            <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Modal title">
               <p className="text-sm text-neutral-600">
-                Drag and drop one or more prediction JSON files here.
+                Modal body content goes here.
               </p>
             </Modal>
           </div>
